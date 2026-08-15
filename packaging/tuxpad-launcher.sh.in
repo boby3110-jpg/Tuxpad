@@ -1,0 +1,8 @@
+#!/bin/bash
+# Tuxpad (Linuxネイティブ タブ型テキストエディタ) の起動ラッパー。
+# システム版PySide6を使うvenv(--system-site-packages)経由で起動する。
+#
+# これは install.sh が読むテンプレート。clone 先の絶対パスが埋め込まれた形で
+# ~/.local/bin/tuxpad などへ生成される（生成は ./install.sh --desktop-only でも可）。
+cd "__INSTALL_DIR__" || exit 1
+exec "__INSTALL_DIR__/.venv/bin/python" "__INSTALL_DIR__/src/main.py" "$@"

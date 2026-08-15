@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Tuxpad
+GenericName=Text Editor
+Comment=Linuxネイティブのタブ型テキストエディタ
+Exec=__LAUNCHER__ %U
+Icon=__ICON__
+Categories=Utility;TextEditor;
+MimeType=text/plain;
+Terminal=false
+StartupNotify=true
+StartupWMClass=tuxpad

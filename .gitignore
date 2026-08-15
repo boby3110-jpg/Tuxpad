@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# venv
+.venv/
+venv/
+env/
+ENV/
+
+# test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# ローカル自動同期デーモン（このマシン固有、リポジトリには含めない）
+pull-sync.py
+pull-sync.log
+.pull-sync.lock

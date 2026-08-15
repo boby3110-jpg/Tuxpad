@@ -1,0 +1,37 @@
+name: tests
+
+# 公開リポ Tuxpad で、push / PR のたびに offscreen テストを自動実行する。
+# 開発リポ(linux-tab-editor)にも同じファイルが入るが、下の `if` で公開リポ
+# のときだけ実行するようにしてあるので、開発リポ側では Actions 分を消費しない。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    # 公開リポ以外（＝私設の開発リポにミラーされたコピー）では走らせない。
+    if: github.repository == 'boby3110-jpg/Tuxpad'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Qt 実行時ライブラリを入れる（offscreen でも必要）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libxcb-cursor0
+
+      - name: 依存パッケージ（PySide6・pytest 等）を入れる
+        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
+
+      - name: テスト（ヘッドレス）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q

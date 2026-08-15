@@ -1,0 +1,6 @@
+-r requirements.txt
+# pytest.ini の faulthandler_exit_on_timeout（固まったテストでプロセスごと
+# 終わらせる設定）は pytest 9.0 以降にしかない。8.x でもテストは通るが、
+# ヘッドレスでモーダルダイアログが開いたときに待ち続けてしまう。
+pytest>=9.0
+pytest-qt>=4.4
