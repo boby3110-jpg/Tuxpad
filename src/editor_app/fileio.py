@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import tempfile
 import unicodedata
 from pathlib import Path
@@ -966,14 +967,64 @@ def write_text_file(
 def write_encoded_file(path: Path | str, data: bytes) -> None:
     """バイト列をファイルへ書き出す（**ディスクへ書くのはここ 1 か所だけ**）。
 
-    書き込み途中で失敗して元のファイルを壊さないよう、同じディレクトリの
-    一時ファイルに書いてから :func:`os.replace` で置き換える。
+    書き込み途中で失敗して元のファイルを壊さないよう、既定では**同じ
+    ディレクトリの一時ファイルに書いてから** :func:`os.replace` で置き換える。
     パーミッションは、既存ファイルがあればそれを引き継ぎ、新規作成なら
     :func:`default_file_mode` （＝普通に作ったファイルと同じ）にする。
+
+    **ハードリンクが張られているファイルだけは例外**（``st_nlink > 1``）。
+    :func:`os.replace` はディレクトリ側の名前を差し替える動きなので、
+    渡された名前は新しい実体を指すが、**もう一方の名前は古い実体
+    （書き換え前の中身）を指したまま**残る。共有フォルダで
+    「同じファイルを 2 か所から見える」ようにしてある利用者に、
+    片方だけ古い中身のまま置いていくのは、利用者の最優先事項
+    （ファイルが壊れて開けなくなる／気づかず古い版を掴む）に
+    真っ向から反する。そのため、リンクが張られている場合は
+    **今の実体を直接 :func:`open` して上書き**する
+    （書き込み途中で電源が落ちれば中身は壊れうるが、名前の付け替えで
+    黙ってリンクが切れるよりは、電源が落ちた時だけ壊れる方がまだよい）。
+
+    シンボリックリンクは受け取らない前提だが（呼び出し側は
+    :func:`resolve_path` を通してから渡してくる）、万一渡されても
+    ``os.replace`` はリンクを実体へ置き換えてしまうため、
+    ここでも先に **:meth:`Path.resolve` して実体側で処理** する。
     """
     path = Path(path)
+    if path.is_symlink():
+        # 呼び出し側が resolve していない場合の最後の砦。ここで実体へ
+        # 付け替えないと、下の一時ファイル + :func:`os.replace` の経路で
+        # リンクそのものが普通のファイルに化ける（``test_save_file.py``
+        # の ``test_write_through_symlink_keeps_the_symlink`` が縛って
+        # いるのは呼び出し側の :func:`resolve_path` だけで、この関数を
+        # 直接触った場合を縛るのは ``test_byte_roundtrip.py`` の
+        # ``TestLinkTargetsAreKept`` 側）。
+        try:
+            path = path.resolve()
+        except (OSError, RuntimeError):
+            pass
 
     directory = path.parent if str(path.parent) else Path(".")
+
+    # ハードリンクが張られている実体は、一時ファイル + :func:`os.replace`
+    # 方式だと片方の名前だけが新しい中身に付け替わり、もう片方は古い
+    # 中身を指したままになる（``os.replace`` の意味論そのもの）。
+    # 「同じファイル」のはずが黙って食い違うのは、利用者の最優先事項
+    # （ファイルを壊さない）に反するので、こちらの経路では**直接
+    # 上書き**して全ての名前が同じ中身を指し続けるようにする。
+    try:
+        existing = path.lstat()
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and stat.S_ISREG(existing.st_mode) and existing.st_nlink > 1:
+        # 直接上書きは電源断で中身が壊れうる（原子的でない）が、
+        # リンクを黙って切ってしまうよりは害が小さい。実体の
+        # パーミッション・所有者はそのまま残る。
+        with open(path, "wb") as fp:
+            fp.write(data)
+            fp.flush()
+            os.fsync(fp.fileno())
+        return
+
     fd, tmp_name = tempfile.mkstemp(dir=str(directory), prefix=f".{path.name}.", suffix=".tmp")
     tmp_path = Path(tmp_name)
     try:
