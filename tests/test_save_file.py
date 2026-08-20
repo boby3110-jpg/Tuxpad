@@ -83,13 +83,17 @@ def test_encode_error_for_unrepresentable_char() -> None:
     assert "🍣" in str(excinfo.value)
 
 
-@pytest.mark.parametrize(
-    "encoding",
-    ["utf-8", "utf-8-sig", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"],
-)
+@pytest.mark.parametrize("encoding", fileio.SELECTABLE_ENCODINGS)
 @pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
 def test_round_trip(tmp_path: Path, encoding: str, newline: str) -> None:
-    """書き出したファイルを読み直すと、本文・文字コード・改行が一致する。"""
+    """書き出したファイルを読み直すと、本文・文字コード・改行が一致する。
+
+    一覧は :data:`fileio.SELECTABLE_ENCODINGS`（＝「文字コードを指定して
+    保存」で利用者に選ばせるもの）**そのまま**にしてある。ここに直接
+    書き並べていた頃は cp932 / euc_jp / iso2022_jp が抜けていて、
+    **選ばせておきながら読み直せない文字コードが 2 つ**紛れていた
+    （JIS と EUC-JP）。選択肢が増えたらここも自動で増えるようにしておく。
+    """
     path = tmp_path / "round.txt"
     text = "1行目\n二行目\nthird\n"
     fileio.write_text_file(path, text, encoding, newline)
@@ -488,6 +492,38 @@ def test_save_error_shows_dialog(
     assert window.save_file() is False
     assert shown == ["保存できません"]
     assert editor.is_modified is True
+
+
+def test_save_stops_when_the_text_cannot_even_be_encoded(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """バイト列に直す段階の失敗も、理由を添えて知らせて**書きに行かない**。
+
+    「この文字コードでは表せない文字がある」(``EncodingError``) とは別の
+    失敗——例えば Python が知らないコーデック名が付いてしまった場合
+    （判定が charset-normalizer に回ると、こちらの一覧に無い名前が
+    返ることがある）。ここを握り潰すと**空のバイト列で上書きしかねない**
+    ので、ファイルには一切触れないまま止める。
+    """
+    target = tmp_path / "変な文字コード.txt"
+    target.write_text("元の内容\n", encoding="utf-8")
+    editor = window.open_path(target)
+    editor.encoding = "そんなコーデックはない"
+    edit_text(editor, "書き換えた\n")
+
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "editor_app.file_commands.show_message_box",
+        lambda _p, _icon, title, text, *a, **k: shown.append((title, text)),
+    )
+
+    assert window.save_editor(editor) is False
+
+    assert target.read_text(encoding="utf-8") == "元の内容\n"
+    assert editor.is_modified is True
+    assert shown and shown[0][0] == "保存できません"
+    # 「保存できない文字がある」の案内（行番号の一覧）と取り違えないこと。
+    assert "そんなコーデックはない" in shown[0][1]
 
 
 def test_save_with_no_tabs_returns_false(window: MainWindow) -> None:

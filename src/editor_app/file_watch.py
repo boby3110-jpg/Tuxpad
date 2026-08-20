@@ -24,6 +24,10 @@
   形で効いてしまう（`docs/performance-notes.md`）。
 - 既に閉じたファイルの通知が遅れて届くことがある。開いているかどうかを
   必ず確かめてから扱うこと。
+- **デバウンスの待ち時間のあいだにウィンドウが閉じられる**ことがある。
+  閉じるときは :meth:`FileWatchMixin._cancel_pending_reloads` で保留を
+  捨てること（``MainWindow.closeEvent`` から呼んでいる）。捨てないと、
+  閉じたはずのウィンドウが後から確認ダイアログを出そうとする。
 
 ``MainWindow`` にミックスインとして混ぜて使う。``self.tabs``・
 ``self.editors()``・``self.find_editor_by_path()`` に依存する。
@@ -33,12 +37,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# shiboken6 は PySide6 の土台（バインディングの実体）で、``PySide6.QtCore`` を
+# import した時点で必ず一緒に読み込まれる。新しい依存ではないので
+# requirements.txt に足す必要は無い（配布元の PySide6 でも同じ）。
+import shiboken6
 from PySide6.QtCore import QFileSystemWatcher, QTimer
 from PySide6.QtWidgets import QMessageBox
 
 from .dialogs import show_message_box
-from .editor import EditorWidget
-from .fileio import read_text_file, resolve_path
+from .editor import EditorWidget, document_text
+from .fileio import read_text_file_detail, resolve_path
 
 #: 開いているファイルが外部で変わってから、再読み込みの確認を出すまでの
 #: 待ち時間 (ms)。連続した書き込みや temp→rename 方式の保存を 1 回に
@@ -135,8 +143,33 @@ class FileWatchMixin:
         self._pending_reload_paths.add(path)
         self._reload_check_timer.start()
 
+    def _cancel_pending_reloads(self) -> None:
+        """保留中の再読み込みを全て取り消し、監視も解く。
+
+        ウィンドウを閉じるときに :meth:`MainWindow.closeEvent` から呼ぶ。
+        閉じたウィンドウが後から「再読み込みしますか？」を出さないように
+        するため（デバウンスの待ち時間 (:data:`RELOAD_CHECK_DELAY_MS`) の
+        あいだに閉じられると、タイマーだけが後に残る）。
+        """
+        self._reload_check_timer.stop()
+        self._pending_reload_paths.clear()
+        watched = self._file_watcher.files()
+        if watched:
+            self._file_watcher.removePaths(watched)
+
     def _process_pending_reloads(self) -> None:
-        """デバウンス後。変更が来ていたファイルを 1 つずつ確認する。"""
+        """デバウンス後。変更が来ていたファイルを 1 つずつ確認する。
+
+        **先にこのウィンドウがまだ生きているかを確かめる**。Qt 側
+        (C++) が既に片付けられた後にこのタイマーが発火することがあり、
+        そのまま ``self.tabs`` に触ると
+        ``Internal C++ object (QStackedWidget) already deleted`` で落ちる。
+        :meth:`_cancel_pending_reloads` で閉じるときに止めてはいるが、
+        閉じる経路を通らずに片付けられる場合（テストの後始末など）が
+        あるため、発火した側でも一度確かめる。
+        """
+        if not shiboken6.isValid(self):
+            return
         paths = list(self._pending_reload_paths)
         self._pending_reload_paths.clear()
         for path in paths:
@@ -168,11 +201,18 @@ class FileWatchMixin:
             return
 
         try:
-            text, encoding, newline = read_text_file(resolved)
+            content = read_text_file_detail(resolved)
         except Exception:  # noqa: BLE001 - 書き込み途中等で読めないだけなら黙って見送る
             return
 
-        if text == editor.toPlainText():
+        text, encoding, newline = content.text, content.encoding, content.newline
+        if text == document_text(editor):
+            # 中身は本文と同じ（自分で保存した直後、外部ツールが同じ内容で
+            # 書き直した等）。「見るべき変更は無い」とここで確定できるので、
+            # 見分け札も今の状態に更新しておく。更新しないと、保存直前の
+            # チェック (`file_commands._check_external_change`) だけが
+            # 古い札を握ったままになり、**中身は同じなのに保存が止まる**。
+            editor.remember_disk_state()
             return
 
         self.tabs.setCurrentWidget(editor)
@@ -202,19 +242,38 @@ class FileWatchMixin:
             self._reload_prompt_active.discard(key)
 
         if answer == QMessageBox.StandardButton.Yes:
-            self._reload_editor_content(editor, text, encoding, newline)
+            self._reload_editor_content(
+                editor, text, encoding, newline, alternatives=content.alternatives
+            )
 
     def _reload_editor_content(
-        self, editor: EditorWidget, text: str, encoding: str, newline: str
+        self,
+        editor: EditorWidget,
+        text: str,
+        encoding: str,
+        newline: str,
+        *,
+        alternatives: tuple[str, ...] = (),
     ) -> None:
-        """エディタの本文をディスクの内容で置き換える（カーソル位置は保つ）。"""
+        """エディタの本文をディスクの内容で置き換える（カーソル位置は保つ）。
+
+        ``alternatives`` は「文字コードの判定が拮抗した」ときの別候補
+        (:attr:`~editor_app.editor.EditorWidget.encoding_alternatives`)。
+        **既定が空なのは意図的**——利用者が自分で文字コードを選んで
+        開き直した場合は拮抗が解決しているので、印を消す側が既定になる。
+        """
         cursor_position = editor.textCursor().position()
         editor.encoding = encoding
+        editor.encoding_alternatives = alternatives
         editor.newline = newline
         editor.set_content(text)
         cursor = editor.textCursor()
         cursor.setPosition(min(cursor_position, len(text)))
         editor.setTextCursor(cursor)
         editor.ensureCursorVisible()
+        # 読み直した以上、このタブが知っているディスクの状態も今の状態。
+        # これがあるおかげで、監視が先に拾って読み直したファイルについては
+        # 保存直前のチェックが重ねてダイアログを出すことはない。
+        editor.remember_disk_state()
         # 保存し直しで監視が外れている場合の再登録。
         self._refresh_file_watches()

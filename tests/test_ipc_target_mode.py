@@ -121,3 +121,30 @@ def test_forward_opens_in_active_window_when_configured(
 
     assert window.current_editor().path == sample.resolve()
     assert other.find_editor_by_path(sample.resolve()) is None
+
+
+def test_forward_active_mode_picks_the_middle_window(
+    window: MainWindow, make_window, tmp_path: Path
+) -> None:
+    """「最後にアクティブにしたウィンドウ」を、最初でも最後でもない所で確かめる。
+
+    上の 3 件は**アクティブにしたウィンドウが「最初のウィンドウ」**だった
+    ため、この設定が壊れて既定（最初のウィンドウ）に落ちても**全部緑のまま
+    通ってしまった**（34 回目に変異 `app-target-active` が生き残って発覚）。
+    利用者がわざわざ選べるようにした設定なので、**最初とも最後とも違う
+    ウィンドウ**を選ばせて、3 つの動きを区別できるようにする。
+    """
+    middle = make_window()
+    last = make_window()
+    window.set_ipc_target_mode(IPC_TARGET_ACTIVE)
+    _activate(middle)
+
+    sample = tmp_path / "sample.txt"
+    sample.write_text("内容", encoding="utf-8")
+
+    _handle_forwarded_paths([str(sample)])
+
+    assert middle.current_editor().path == sample.resolve()
+    # 既定（最初）にも「最後」にも落ちていないこと。
+    assert window.find_editor_by_path(sample.resolve()) is None
+    assert last.find_editor_by_path(sample.resolve()) is None

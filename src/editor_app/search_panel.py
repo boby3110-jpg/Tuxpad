@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .editor import document_text
 from .settings import load_search_input_lines
 
 #: プレビュー文字列に使う、マッチ内の改行の置き換え記号（機能 6 のテストでも使う）。
@@ -307,7 +308,7 @@ class SearchPanel(QWidget):
         self._input.setTextCursor(cursor)
 
     def query(self) -> str:
-        return self._input.toPlainText()
+        return document_text(self._input)
 
     def searched_query(self) -> str | None:
         """最後に実際に検索した語（一度も検索していなければ None）。
@@ -342,7 +343,7 @@ class SearchPanel(QWidget):
         return self._replace_input.isVisible()
 
     def replace_text(self) -> str:
-        return self._replace_input.toPlainText()
+        return document_text(self._replace_input)
 
     def matches(self) -> list[SearchMatch]:
         """現在の検索結果全件（本文中のハイライト表示などに使う）。"""

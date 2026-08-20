@@ -28,6 +28,24 @@ def test_resolve_file_arguments_empty_list_is_empty() -> None:
     assert _resolve_file_arguments([]) == []
 
 
+def test_resolve_file_arguments_drops_file_uri_without_a_path() -> None:
+    """ローカルパスに直せない ``file://`` は、空文字を混ぜずに捨てる。
+
+    ``QUrl("file://").toLocalFile()`` は空文字を返す。ここで捨てそこねると
+    **空文字がファイルパスとして後段へ流れる**——`_handle_forwarded_paths()`
+    はそれを `open_path("")` まで運んでしまい、開けるはずの残りのファイルの
+    前に無関係なエラーが出る。`if local_path:` の 1 行がそれを防いでいるが、
+    34 回目まで、この行を外してもテストは全て緑のままだった（変異
+    `app-uri-empty-guard`）。
+    """
+    assert _resolve_file_arguments(["file://"]) == []
+
+
+def test_resolve_file_arguments_keeps_valid_paths_beside_a_broken_uri() -> None:
+    """壊れた ``file://`` が混ざっていても、まともなファイルは残す。"""
+    assert _resolve_file_arguments(["file://", "/tmp/b.txt"]) == ["/tmp/b.txt"]
+
+
 def test_window_opens_files_resolved_from_argv(
     window: MainWindow, tmp_path: Path
 ) -> None:

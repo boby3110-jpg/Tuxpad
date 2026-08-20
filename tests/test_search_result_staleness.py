@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from PySide6.QtCore import QPoint
 from PySide6.QtGui import QTextCursor
 
 from editor_app.main_window import MainWindow
@@ -386,6 +387,28 @@ def test_moving_a_tab_to_another_window_refreshes_both(
 
     assert len(source.search_panel.matches()) == 0
     assert len(target.search_panel.matches()) == 1
+
+
+def test_tearing_a_tab_off_refreshes_the_source_window(make_window) -> None:
+    """タブを新しいウィンドウへ切り離したら、元の検索結果も作り直す。
+
+    「別のウィンドウへ移す」経路
+    (:func:`test_moving_a_tab_to_another_window_refreshes_both`) は固定して
+    あったが、**新しいウィンドウへ切り離す経路は同じ後始末を誰も見て
+    いなかった**。:class:`SearchMatch` は「このウィンドウの何番目のタブか」
+    で位置を覚えているので、切り離しで並びが詰まると**残ったタブの
+    関係ない場所を指したまま**になる。その状態で「置換」を押されると、
+    2026-08-07 に直した「文字位置のずれ」と同じ壊れ方をする。
+    """
+    source = make_window()
+    torn_off, _remaining = make_tabs(source, "切り離すタブ テスト", "残るタブ")
+    open_replace_panel(source, "テスト", "ZZZ")
+    assert len(source.search_panel.matches()) == 1
+
+    new_window = source._tear_off_tab_to_new_window(torn_off, QPoint(300, 300))
+
+    assert new_window is not None
+    assert len(source.search_panel.matches()) == 0
 
 
 def test_moved_tab_refreshes_its_new_window_only(make_window, qtbot) -> None:

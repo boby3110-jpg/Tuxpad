@@ -7,12 +7,21 @@ MainWindow に組み込んだ状態での動作の両方を確認する。
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QSize, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 from editor_app.main_window import MainWindow
-from editor_app.tab_bar import MAX_TAB_WIDTH, MIN_TAB_WIDTH, MultiRowTabBar
+from editor_app.tab_bar import (
+    CLOSE_SIZE,
+    CLOSE_SPACING,
+    H_PADDING,
+    MAX_TAB_WIDTH,
+    MIN_TAB_WIDTH,
+    ROW_SPACING,
+    TAB_SPACING,
+    MultiRowTabBar,
+)
 from editor_app.tab_widget import MultiRowTabWidget
 
 # ----------------------------------------------------------------------
@@ -50,6 +59,21 @@ def fill(bar: MultiRowTabBar, count: int, prefix: str = "ファイル") -> None:
 
 def rows_of(bar: MultiRowTabBar) -> list[int]:
     return [bar.tabRow(i) for i in range(bar.count())]
+
+
+def name_of_middling_width(bar: MultiRowTabBar) -> str:
+    """最小幅にも最大幅にも当たらない長さのタブ名を作る。
+
+    1 文字の幅はフォント次第（実行環境で違う）なので、長さを決め打ちにすると
+    環境によっては上限・下限で頭打ちになり、幅を比べるテストが意味を失う。
+    実際に測って、ちょうど真ん中あたりになる長さにする。
+    """
+    metrics = bar.fontMetrics()
+    target = (MIN_TAB_WIDTH + MAX_TAB_WIDTH) // 2
+    name = "名"
+    while metrics.horizontalAdvance(name + "名") < target and len(name) < 100:
+        name += "名"
+    return name + ".txt"
 
 
 def send_mouse(widget, event_type, pos: QPoint, button, buttons) -> None:
@@ -126,6 +150,100 @@ def test_tabs_in_the_same_row_do_not_overlap(bar: MultiRowTabBar) -> None:
         if row in previous_right:
             assert rect.left() > previous_right[row]
         previous_right[row] = rect.right()
+
+
+def test_tabs_in_the_same_row_are_separated_by_the_spacing(bar: MultiRowTabBar) -> None:
+    """同じ段の隣り合うタブの間隔は、ちょうど ``TAB_SPACING`` px。
+
+    「重なっていない」だけでは、隙間を 0 にしてもテストは通ってしまう
+    （タブの境目が見えなくなるのに気づけない）。間隔そのものを固定する。
+    """
+    fill(bar, 20)
+    previous = {}
+    for i in range(bar.count()):
+        rect = bar.tabRect(i)
+        row = bar.tabRow(i)
+        if row in previous:
+            # QRect.right() は「最後の 1px」なので、隙間は right + 1 から数える。
+            assert rect.left() - (previous[row].right() + 1) == TAB_SPACING
+        previous[row] = rect
+
+
+def test_rows_are_separated_by_the_row_spacing(bar: MultiRowTabBar) -> None:
+    """段と段の間も、ちょうど ``ROW_SPACING`` px 空ける。"""
+    fill(bar, 20)
+    assert bar.rowCount() > 1
+    first_of_row = {}
+    for i in range(bar.count()):
+        first_of_row.setdefault(bar.tabRow(i), bar.tabRect(i))
+
+    for row in range(1, bar.rowCount()):
+        above = first_of_row[row - 1]
+        here = first_of_row[row]
+        assert here.top() - (above.bottom() + 1) == ROW_SPACING
+
+
+def test_height_leaves_no_row_cut_off(bar: MultiRowTabBar) -> None:
+    """タブバーの高さは、最下段のタブの下端ぴったりまである。
+
+    段間の隙間を高さの計算に数え忘れると、**最下段だけが下から欠けて**
+    表示される（段数が増えるほど欠ける量が増える）。
+    """
+    fill(bar, 20)
+    assert bar.rowCount() > 1
+    lowest = max(bar.tabRect(i).bottom() for i in range(bar.count()))
+    assert bar.height() == lowest + 1
+
+
+def test_very_narrow_bar_keeps_the_minimum_tab_width(bar: MultiRowTabBar) -> None:
+    """タブバーが最小幅より狭くても、タブは最小幅を保つ（潰さない）。
+
+    ``minimumSizeHint()`` があるので実際の画面ではここまで狭くならないが、
+    それに頼って計算側の下限を外すと、狭めたときにタブが数 px まで潰れて
+    押せなくなる（``closeButtonRect()`` も消える）。負けた側の挙動として固定する。
+    """
+    bar.addTab("a.txt")
+    bar.resize(20, bar.height())
+    QApplication.processEvents()
+    bar._relayout()  # 実際の幅に関わらず、計算そのものを確かめる
+    assert bar.tabRect(0).width() == MIN_TAB_WIDTH
+
+
+def test_closable_tabs_reserve_room_for_the_close_button(qtbot) -> None:
+    """閉じるボタンを出す設定にすると、そのぶんタブが広くなる。
+
+    広げ忘れると × がファイル名の上に重なる（名前が読めなくなる）。
+    """
+    widths = []
+    for closable in (False, True):
+        plain = MultiRowTabBar()
+        qtbot.addWidget(plain)
+        plain.resize(600, 30)
+        plain.setTabsClosable(closable)
+        # 最小幅・最大幅で頭打ちにならない名前にする（フォントによって
+        # 1 文字の幅が違うので、実際に測ってから長さを決める）。
+        plain.addTab(name_of_middling_width(plain))
+        rect = plain.tabRect(0)
+        assert MIN_TAB_WIDTH < rect.width() < MAX_TAB_WIDTH
+        widths.append(rect.width())
+
+    assert widths[1] - widths[0] == CLOSE_SIZE + CLOSE_SPACING
+
+
+def test_text_does_not_run_under_the_close_button(bar: MultiRowTabBar) -> None:
+    """ファイル名の描画範囲は × の手前で終わる（文字が × の下に潜らない）。"""
+    bar.addTab("ちょうどよい長さの名前.txt")
+    assert bar._text_rect(0).right() < bar.closeButtonRect(0).left()
+
+
+def test_close_button_sits_at_the_right_edge_of_the_tab(bar: MultiRowTabBar) -> None:
+    """× の当たり判定は、タブの右端から ``H_PADDING`` px 内側にぴったり収まる。"""
+    fill(bar, 3)
+    tab = bar.tabRect(1)
+    close = bar.closeButtonRect(1)
+    assert close.size() == QSize(CLOSE_SIZE, CLOSE_SIZE)
+    assert close.right() == tab.right() - H_PADDING
+    assert tab.contains(close)
 
 
 def test_narrower_width_means_more_rows(bar: MultiRowTabBar) -> None:
@@ -237,6 +355,63 @@ def test_middle_click_requests_close(bar: MultiRowTabBar, qtbot) -> None:
     with qtbot.waitSignal(bar.tabCloseRequested, timeout=1000) as blocker:
         click(bar, bar.tabRect(2).center(), button=Qt.MouseButton.MiddleButton)
     assert blocker.args == [2]
+
+
+def press_release(widget, press_pos: QPoint, release_pos: QPoint, button) -> None:
+    """押した場所と離した場所が違うクリックを送る（押し間違いの取り消し）。"""
+    send_mouse(widget, QEvent.Type.MouseButtonPress, press_pos, button, button)
+    send_mouse(
+        widget, QEvent.Type.MouseButtonRelease, release_pos, button, Qt.MouseButton.NoButton
+    )
+
+
+def test_close_is_cancelled_by_releasing_off_the_button(bar: MultiRowTabBar) -> None:
+    """× を押してから、× の外へずらして離せば閉じない（押し間違いの取り消し）。
+
+    ボタンの作法どおり「押した場所と離した場所が同じ × のときだけ」閉じる。
+    同じタブの上でありさえすれば閉じてしまうと、取り消す方法が無くなる。
+    """
+    fill(bar, 3)
+    closed: list[int] = []
+    bar.tabCloseRequested.connect(closed.append)
+
+    press_release(
+        bar,
+        bar.closeButtonRect(1).center(),
+        bar.tabRect(1).center(),  # 同じタブだが × の外
+        Qt.MouseButton.LeftButton,
+    )
+    assert closed == []
+
+
+def test_middle_click_released_on_another_tab_does_not_close(bar: MultiRowTabBar) -> None:
+    """中クリックも、押したタブの上で離さなければ閉じない。"""
+    fill(bar, 3)
+    closed: list[int] = []
+    bar.tabCloseRequested.connect(closed.append)
+
+    press_release(
+        bar,
+        bar.tabRect(0).center(),
+        bar.tabRect(2).center(),
+        Qt.MouseButton.MiddleButton,
+    )
+    assert closed == []
+
+
+def test_middle_click_released_outside_any_tab_does_not_close(bar: MultiRowTabBar) -> None:
+    """中クリックをタブの無い余白で離しても閉じない（位置 -1 を投げない）。"""
+    bar.addTab("a.txt")
+    closed: list[int] = []
+    bar.tabCloseRequested.connect(closed.append)
+
+    press_release(
+        bar,
+        bar.tabRect(0).center(),
+        QPoint(bar.width() - 5, bar.height() - 2),
+        Qt.MouseButton.MiddleButton,
+    )
+    assert closed == []
 
 
 def test_close_button_is_absent_when_not_closable(qtbot) -> None:
@@ -558,6 +733,103 @@ def test_move_tab_to_the_same_place_is_a_no_op(
 
     assert [tab_widget.tabText(i) for i in range(3)] == ["1つ目", "2つ目", "3つ目"]
     assert moved == []
+
+
+def test_move_tab_keeps_the_shown_page_in_step(
+    tab_widget: MultiRowTabWidget,
+) -> None:
+    """並べ替えたあと、選ばれているタブと**実際に映るページ**が食い違わない。
+
+    ``QStackedWidget`` は「何番目を映すか」を自分で覚えているので、
+    ページを入れ替えると**映す番号だけが元のまま取り残される**。並べ替えの
+    最後に合わせ直さないと、**タブは「1つ目」が選ばれているのに、映って
+    いるのは「2つ目」の中身**という状態になる。テキストエディタでこれが
+    起きると、利用者は**見えている本文と違うファイルを編集・保存する**
+    ことになるので、いちばん起こしてはいけない食い違い。
+
+    既存の並べ替えのテストは ``currentWidget()`` しか見ていないが、これは
+    **タブバー側の選択から引く**ので、映す番号がずれていても正しく見える。
+    ここでは ``stack()`` 側（＝実際に映っているページ）を直接見る。
+    """
+    for name in ["1つ目", "2つ目", "3つ目"]:
+        add_page(tab_widget, name)
+
+    # 前へ動かす場合
+    tab_widget.setCurrentIndex(0)
+    current = tab_widget.currentWidget()
+    tab_widget.moveTab(0, 2)
+    assert tab_widget.currentIndex() == 2
+    assert tab_widget.stack().currentIndex() == 2
+    assert tab_widget.stack().currentWidget() is current
+
+    # 後ろへ動かす場合（ずれ方が逆になるので、両方向とも見る）
+    current = tab_widget.currentWidget()
+    tab_widget.moveTab(2, 0)
+    assert tab_widget.currentIndex() == 0
+    assert tab_widget.stack().currentIndex() == 0
+    assert tab_widget.stack().currentWidget() is current
+
+
+def test_move_tab_reports_the_move_from_first_then_to(
+    tab_widget: MultiRowTabWidget,
+) -> None:
+    """``tabMoved`` は (移動元, 移動先) の順で知らせる。
+
+    いまの受け手 (``_on_tab_set_changed``) は引数を使わず「並びが変わった」
+    合図としてしか見ていないので、入れ替わっていても症状は出ない。だが
+    :class:`MultiRowTabWidget` はこの順番を約束として書いてあり、あとから
+    「どこからどこへ動いたか」を使う受け手が増えたときに、**黙って逆を
+    渡す**のがいちばん見つけにくい。約束のうちに固定しておく。
+    """
+    for name in ["1つ目", "2つ目", "3つ目"]:
+        add_page(tab_widget, name)
+    moved: list[tuple[int, int]] = []
+    tab_widget.tabMoved.connect(lambda a, b: moved.append((a, b)))
+
+    tab_widget.moveTab(0, 2)
+    tab_widget.moveTab(2, 1)
+
+    # 入れ替わっていれば [(2, 0), (1, 2)] になる（どちらの回も左右非対称）。
+    assert moved == [(0, 2), (2, 1)]
+
+
+def test_removed_page_survives_the_old_tab_widget(qtbot) -> None:
+    """取り除いたページは、元のタブウィジェットを片付けても生き残る。
+
+    ``QStackedWidget.removeWidget()`` は**親子関係を切らない**（Qt の仕様。
+    ページは隠れるだけで、親は ``QStackedWidget`` のまま残る）。そのため
+    明示的に親を外しておかないと、**元のウィンドウが片付いた瞬間に、
+    取り出したはずのページも一緒に道連れで消える**。
+
+    いまはタブを別ウィンドウへ移す経路が、取り出した直後に移動先へ
+    つなぎ直している（＝そこで親が上書きされる）ので症状は出ない。しかし
+    その順番が少しでも変われば、**未保存の本文ごとタブが消える**という
+    取り返しのつかない壊れ方になる。取り出した時点で親が切れていることを
+    約束として固定する。
+
+    ここでは ``qtbot`` に登録せず自前で片付ける（テストの中で本当に
+    破棄して、道連れになるかどうかを見るため）。
+    """
+    import shiboken6
+    from PySide6.QtWidgets import QLabel
+
+    widget = MultiRowTabWidget()
+    widget.resize(400, 300)
+    for name in ["1つ目", "2つ目"]:
+        page = QLabel(name)
+        page.setObjectName(name)
+        widget.addTab(page, name)
+    taken = widget.widget(0)
+
+    widget.removeTab(0)
+    assert taken.parent() is None
+
+    # 元のタブウィジェットを Qt 側（C++）ごと本当に破棄する。
+    shiboken6.delete(widget)
+    qtbot.wait(1)
+
+    assert shiboken6.isValid(taken)
+    taken.deleteLater()
 
 
 # ----------------------------------------------------------------------

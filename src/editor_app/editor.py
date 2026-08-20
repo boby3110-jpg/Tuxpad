@@ -15,6 +15,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QTextEdit
 
+from .fileio import file_signature
 from .tab_bar import TAB_MIME_TYPE
 
 DEFAULT_ENCODING = "utf-8"
@@ -92,6 +93,50 @@ _RESERVED_APP_SHORTCUTS: frozenset[tuple[Qt.Key, Qt.KeyboardModifier]] = frozens
     }
 )
 
+#: Qt が文書の中で段落の区切り (= 改行) に使う文字。
+_PARAGRAPH_SEPARATOR = "\u2029"
+
+#: Qt が文書の中で「段落の中の行の区切り」に使う文字。**Shift+Enter を
+#: 押すとこれが入る**（QTextEdit の既定の動作）。
+_LINE_SEPARATOR = "\u2028"
+
+
+def document_text(widget) -> str:
+    """本文を取り出す。**``toPlainText()`` を使ってはいけない。**
+
+    ``QTextDocument.toPlainText()`` は、文書に入っている文字をそのまま
+    返さない。**改行しない空白 (U+00A0, NBSP) を普通の半角空白へ黙って
+    置き換える**（Qt 側の仕様）。そのため「開いて、何も触らずに保存する」
+    だけで、本文中の NBSP が全て普通の空白に変わってしまう。**NBSP と
+    空白は画面上で見分けが付かないので、利用者は一生気づけない** ——
+    ウェブや Word から貼り付けた日本語の文書にはよく紛れ込む文字で、
+    利用者の最優先事項（ファイルを勝手に変えない）に真っ向から反する。
+
+    そこで ``toRawText()``（置き換えをしない生の文字列）から取り、
+    **改行として扱うべき 2 文字だけ**を ``\\n`` へ直す:
+
+    - ``U+2029`` … Qt が段落の区切りに使う文字。読み込んだ ``\\n`` は
+      全てこれになる。
+    - ``U+2028`` … 段落の中の行区切り。**Shift+Enter で入る**ため、
+      ここを残すと「利用者は改行したつもりなのに、ファイルには目に見えない
+      文字が 1 つ書かれる」ことになる（Shift-JIS では保存すらできなくなる）。
+      画面上も改行に見えているので、``\\n`` として書き出すのが素直。
+
+    置き換えは 1 文字 → 1 文字なので、``toPlainText()`` と**文字数も位置も
+    完全に同じ**まま。文字位置を Qt の文書位置へ直す既存の計算
+    (:mod:`editor_app.textsearch`) はそのまま使える。
+
+    なお **NBSP を落とすかどうかは保存の側で決める**
+    （:func:`~editor_app.fileio.downgrade_no_break_spaces`）。ここは
+    「文書に入っている文字をそのまま渡す」に徹する——落とすかどうかは
+    **保存先の文字コード次第**であり、本文の取り出しには判断材料が無いため。
+
+    この約束（`src/` の中で ``toPlainText()`` を呼ばない・``toRawText()`` は
+    ここだけ）は `tests/test_document_text_only.py` が構文木で見張っている。
+    """
+    raw = widget.document().toRawText()
+    return raw.replace(_PARAGRAPH_SEPARATOR, "\n").replace(_LINE_SEPARATOR, "\n")
+
 
 class EditorWidget(QTextEdit):
     """1 つの文書 (タブ) を表す編集ウィジェット.
@@ -101,7 +146,8 @@ class EditorWidget(QTextEdit):
     ``path`` が None で、``untitled_name`` に「無題-1」などの仮の名前を持つ。
     """
 
-    #: タブに表示すべき内容 (名前 or 変更状態) が変わったときに発火する
+    #: タブやウィンドウに表示すべき内容 (名前・変更状態・文字コード) が
+    #: 変わったときに発火する
     display_state_changed = Signal()
 
     def __init__(
@@ -116,7 +162,14 @@ class EditorWidget(QTextEdit):
         super().__init__(parent)
         self._path = Path(path) if path is not None else None
         self._untitled_name = untitled_name
-        self.encoding = encoding
+        self._encoding = encoding
+        #: 文字コードの判定が拮抗したときの「もう一方の候補」。
+        #: :attr:`encoding_alternatives` を参照。
+        self._encoding_alternatives: tuple[str, ...] = ()
+        #: 最後に見たディスク上の状態。:meth:`remember_disk_state` で控える。
+        self._disk_signature: tuple[int, int] | None = None
+        #: 上書きされる前の姿を既に控えたファイル。:attr:`backed_up_path` 参照。
+        self._backed_up_path: Path | None = None
         self.newline = newline
         self._wrap_mode = DEFAULT_WRAP_MODE
         self._wrap_column = DEFAULT_WRAP_COLUMN
@@ -491,7 +544,116 @@ class EditorWidget(QTextEdit):
 
     @path.setter
     def path(self, value: Path | str | None) -> None:
-        self._path = Path(value) if value is not None else None
+        new_path = Path(value) if value is not None else None
+        # 「このタブは、このファイルを上書きする前の姿を既に控えた」という
+        # 記録は、**指す先が変わったときだけ**捨てる（:attr:`backed_up_path`）。
+        # 保存できた直後にも同じパスがここへ代入し直されるので、無条件に
+        # 捨てると「初めての保存」の控えが毎回の保存で作られてしまう。
+        if new_path != self._path:
+            self._backed_up_path = None
+        self._path = new_path
+        # 指す先が変わった以上、前のファイルについて覚えていた「見分け札」は
+        # もう使えない。ここで必ず捨て、必要なら代入した側が
+        # :meth:`remember_disk_state` で取り直す（別のファイルの札を
+        # 持ち越すと、そのファイルは外部で変わっていないのに
+        # 「変わっている」と判定されてしまう）。
+        self._disk_signature = None
+        self.display_state_changed.emit()
+
+    # ------------------------------------------------------------------
+    # 外部変更の検知用（保存直前のチェック）
+    # ------------------------------------------------------------------
+    @property
+    def disk_signature(self) -> tuple[int, int] | None:
+        """このタブが最後に見たディスク上の状態 ``(更新日時 ns, サイズ)``。
+
+        「保存しようとした時点で、読み込んだ後に誰かがこのファイルを
+        書き換えていないか」を判定するための控え
+        (:func:`~editor_app.fileio.file_signature`)。まだ控えていない
+        （無題タブ・存在しないファイル）場合は None。
+        """
+        return self._disk_signature
+
+    def remember_disk_state(self) -> None:
+        """今ディスクにある状態を「自分が知っている状態」として控え直す。
+
+        **控えるのはこの 1 か所だけにしてある。** 控え直すべき場面は
+        「開いた直後」「保存できた直後」「外部変更を読み直した直後」と
+        散らばっており、それぞれで ``stat`` を書くと必ずどれかが漏れて
+        「保存できないタブ」や「外部変更を見逃すタブ」が生まれる。
+        """
+        self._disk_signature = file_signature(self._path)
+
+    # ------------------------------------------------------------------
+    # 上書き前の控え（引き継ぎ ⑦。:mod:`editor_app.backups`）
+    # ------------------------------------------------------------------
+    @property
+    def backed_up_path(self) -> Path | None:
+        """このタブが「上書きする前の姿」を既に控えたファイル（無ければ None）。
+
+        控えるのは**そのタブがそのファイルへ初めて書き込む直前の 1 回だけ**
+        なので、「もう控えたかどうか」をタブ自身が覚えておく必要がある。
+        真偽値ではなく**パス**で持つのは、「名前を付けて保存」で保存先が
+        移ったときに、前のファイルの控えを取ったことをもって新しい保存先を
+        控えずに済ませてしまわないため（:attr:`path` の setter で捨てている
+        のもこの理由）。
+        """
+        return self._backed_up_path
+
+    @backed_up_path.setter
+    def backed_up_path(self, value: Path | str | None) -> None:
+        self._backed_up_path = Path(value) if value is not None else None
+
+    @property
+    def encoding(self) -> str:
+        """この文書の文字コード (コーデック名)。
+
+        読み込んだときのものを保持し、保存時もこれで書き戻す (機能 8)。
+        「文字コードを指定して保存」で保存し直したときと、外部で変わった
+        ファイルを再読み込みしたときは、その文字コードに入れ替わる。
+        """
+        return self._encoding
+
+    @encoding.setter
+    def encoding(self, value: str) -> None:
+        """文字コードを差し替え、変わったならウィンドウ側へ知らせる。
+
+        ステータスバーには「今のタブの文字コード」が出ているので、
+        代入した誰か (開く・再読み込み・文字コードを指定して保存) が
+        それぞれ更新を呼ぶ形にすると、いずれ呼び忘れが出る。
+        ここ 1 か所から :attr:`display_state_changed` を出すことで、
+        代入すれば必ず表示も追いつくようにしてある。
+        """
+        if value == self._encoding:
+            return
+        self._encoding = value
+        self.display_state_changed.emit()
+
+    @property
+    def encoding_alternatives(self) -> tuple[str, ...]:
+        """文字コードの判定が拮抗したときの、もう一方の候補（無ければ空）。
+
+        「このファイルは cp932 でも euc_jp でも読めてしまい、点数で
+        cp932 を選んだ」という事情
+        （:func:`~editor_app.fileio._pick_japanese_legacy_detail`）を、
+        ステータスバーの印として利用者に伝えるために持っている
+        （利用者の最優先事項は「文字化けしたまま編集して保存し、ファイルを
+        壊してしまう」ことを避けること。**編集する前に気づける経路**を
+        増やすのがいちばん効く）。
+
+        **文字コードが変わったら必ず入れ直すこと。** 開き直し・再読み込み・
+        文字コードを指定して保存のいずれも、その時点の判定に基づいて
+        設定し直す（利用者が自分で文字コードを選んだ場合は「拮抗は解決した」
+        ので空にする）。
+        """
+        return self._encoding_alternatives
+
+    @encoding_alternatives.setter
+    def encoding_alternatives(self, value) -> None:
+        alternatives = tuple(value)
+        if alternatives == self._encoding_alternatives:
+            return
+        self._encoding_alternatives = alternatives
         self.display_state_changed.emit()
 
     @property
@@ -538,7 +700,7 @@ class EditorWidget(QTextEdit):
         「新規作成」直後のまっさらなタブを、ファイルを開いたときに
         使い回してよいかを判断するために使う。
         """
-        return self.is_untitled and not self.is_modified and not self.toPlainText()
+        return self.is_untitled and not self.is_modified and not document_text(self)
 
 
 def center_cursor_vertically(editor: EditorWidget) -> None:

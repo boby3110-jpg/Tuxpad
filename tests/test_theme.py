@@ -208,6 +208,23 @@ def test_scroll_bar_qss_defines_every_subcontrol(theme: str, subcontrol: str) ->
     assert f"QScrollBar::{subcontrol}" in body, f"{subcontrol} の指定が漏れている"
 
 
+def test_colors_for_returns_a_copy_that_callers_cannot_corrupt() -> None:
+    """色表は**複製して**返す（呼び出し側が書き換えても大元は無事なこと）。
+
+    `colors_for()` の `dict(...)` は、うっかり書き換えられても**アプリ全体の
+    配色が壊れない**ようにするためのもの。いまは書き換える呼び出し側が
+    無いので外しても動くが、外れていることに誰も気づけない（34 回目に
+    変異 `t-colors-defensive-copy` が生き残って発覚）。あとから
+    「取ってきた色表をその場で少しいじる」書き方をされたときに、
+    静かに全体が壊れるのを防ぐため、契約としてここで固定しておく。
+    """
+    colors = colors_for(THEME_LIGHT)
+    original = colors["window"]
+    colors["window"] = "#ff00ff"
+
+    assert colors_for(THEME_LIGHT)["window"] == original
+
+
 @pytest.mark.parametrize("theme", [THEME_LIGHT, THEME_DARK])
 def test_scroll_bar_handle_contrasts_with_its_groove(theme: str) -> None:
     """つまみと溝の明度をはっきり離すこと（これが今回の目的そのもの）。"""

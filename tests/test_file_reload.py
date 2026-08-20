@@ -363,3 +363,89 @@ def test_reload_clamps_cursor_when_file_shrinks(
     assert editor.toPlainText() == "か\n"
     # 丸めていれば末尾（本文の長さ）。丸めを外すと 0 になる。
     assert editor.textCursor().position() == len("か\n")
+
+
+# ----------------------------------------------------------------------
+# ウィンドウを閉じた後に、保留中の再読み込みが後追いで動かないこと
+# （2026-08-16（26 回目）。CI が理由もなく赤くなる原因を塞いだもの）
+# ----------------------------------------------------------------------
+
+
+def test_closing_window_cancels_pending_reload(
+    make_window, sample: Path, monkeypatch
+) -> None:
+    """閉じるまでのあいだに溜まった再読み込みは、閉じた時点で捨てること。
+
+    外部変更を検知してから確認を出すまでには
+    :data:`~editor_app.file_watch.RELOAD_CHECK_DELAY_MS` の待ち時間があり、
+    **その 1〜2 秒のあいだにウィンドウを閉じられる**ことがある。捨てずに
+    おくと、閉じたはずのウィンドウが後から「再読み込みしますか？」を
+    出そうとする（利用者から見れば、閉じたウィンドウが蘇る）。
+    """
+    window = make_window()
+    window.open_path(sample)
+    calls = _patch_prompt(monkeypatch, QMessageBox.StandardButton.Yes)
+
+    sample.write_text("外部で書き換えた内容\n", encoding="utf-8")
+    window._pending_reload_paths.add(str(sample.resolve()))
+    window._reload_check_timer.start()
+
+    window.close()
+
+    assert window._pending_reload_paths == set()  # 保留は捨てられている
+    assert window._reload_check_timer.isActive() is False  # タイマーも止まっている
+    # 万一この後にタイマーが発火しても、確認は出ない。
+    window._process_pending_reloads()
+    assert calls == []
+
+
+def test_closing_window_stops_watching_files(make_window, sample: Path) -> None:
+    """閉じたウィンドウは、ファイルの監視自体からも手を引くこと。
+
+    監視が残っていると、閉じた後の変更通知
+    (:meth:`~editor_app.file_watch.FileWatchMixin._on_watched_file_changed`)
+    がこのウィンドウに届き続ける。
+    """
+    window = make_window()
+    window.open_path(sample)
+    assert str(sample.resolve()) in window._file_watcher.files()
+
+    window.close()
+
+    assert window._file_watcher.files() == []
+
+
+def test_pending_reload_after_teardown_is_ignored(
+    qtbot, sample: Path, monkeypatch
+) -> None:
+    """Qt 側が片付いた後にタイマーが発火しても、落ちないこと。
+
+    ``closeEvent`` を通らずにウィンドウが片付けられる経路（テストの
+    後始末など）では、保留を捨てる手が回らない。そのまま ``self.tabs`` に
+    触ると ``Internal C++ object (QStackedWidget) already deleted`` の
+    ``RuntimeError`` になる。実際に、無関係なテストがこれで 1 度落ちている
+    （2026-08-16（25 回目）の記録）。
+    """
+    import shiboken6
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    # ここでは自分で片付けるので、``make_window``（pytest-qt に後始末を
+    # 任せるフィクスチャ）は使わない。pytest-qt は登録したウィジェットを
+    # 後で必ず ``close()`` するため、先に消してあると後始末側が落ちる。
+    # ``qtbot`` を引数に取っているのは QApplication を用意させるためだけ。
+    window = MainWindow()
+    window.show()
+    window.open_path(sample)
+    calls = _patch_prompt(monkeypatch, QMessageBox.StandardButton.Yes)
+
+    sample.write_text("外部で書き換えた内容\n", encoding="utf-8")
+    window._pending_reload_paths.add(str(sample.resolve()))
+
+    # pytest-qt の後始末と同じ形で Qt 側だけ消す（Python 側の窓口は残る）。
+    window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert shiboken6.isValid(window) is False
+
+    window._process_pending_reloads()  # 落ちないこと（ここが本題）
+
+    assert calls == []

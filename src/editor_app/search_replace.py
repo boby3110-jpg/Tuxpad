@@ -38,7 +38,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QTextCursor
 
 from .dialogs import prompt_int
-from .editor import center_cursor_vertically
+from .editor import center_cursor_vertically, document_text
 from .search_panel import NEWLINE_GLYPH, SearchMatch, SearchPanel
 from .settings import save_search_input_lines
 from .textsearch import find_matches, fold_case, line_number_at, line_snippet
@@ -280,7 +280,7 @@ class SearchReplaceMixin:
         matches: list[SearchMatch] = []
         for index, editor in enumerate(self.editors()):
             title = self._tab_title(editor)
-            text = editor.toPlainText()
+            text = document_text(editor)
             for span in find_matches(text, query):
                 matches.append(
                     SearchMatch(

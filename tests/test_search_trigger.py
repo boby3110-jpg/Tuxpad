@@ -102,6 +102,30 @@ def test_editing_the_text_does_not_search_an_untriggered_query(
     assert calls == ["foo"]
 
 
+def test_refresh_does_not_search_before_any_query_was_run(
+    window: MainWindow, monkeypatch
+) -> None:
+    """一度も検索していないうちに再検索の合図（タブの増減など）が来ても、
+    ``searched_query()`` が ``None`` のうちは全タブ検索を走らせない。
+
+    再検索は「最後に実際に検索した語」で行うため、まだ何も検索していない
+    段階では走らせる語が無い。ここを踏み越えると ``None`` を検索語として
+    全タブ検索に渡してしまう（``_refresh_search_results`` の防御分岐）。
+    パネルは開いているが検索前、という状態を作るために、通常の
+    ``show_search_panel()``（開いた時点で 1 回検索する）ではなく、パネルを
+    直接 ``show()`` して分岐そのものを呼ぶ。
+    """
+    make_tabs(window, "foo bar\n")
+    window.search_panel.show()
+    assert window.search_panel.isVisible()
+    assert window.search_panel.searched_query() is None
+
+    calls = count_searches(window, monkeypatch)
+    window._refresh_search_results()
+
+    assert calls == []
+
+
 # ----------------------------------------------------------------------
 # (b) Enter / 「検索」ボタンで初めて検索される
 # ----------------------------------------------------------------------

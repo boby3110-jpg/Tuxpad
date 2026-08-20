@@ -54,3 +54,25 @@ def test_search_input_colors_survive_repeated_theme_switching(
         window.set_theme(theme)
         _assert_fixed_colors(window.search_panel._input)
         _assert_fixed_colors(window.search_panel._replace_input)
+
+
+def test_changeevent_does_not_reapply_while_already_reapplying(
+    window: MainWindow,
+) -> None:
+    """配色を貼り直している最中の ``changeEvent`` は、貼り直しを繰り返さない。
+
+    ``_apply_fixed_palette()`` の ``setPalette()`` が自分自身への
+    ``changeEvent`` を呼び戻すため、この再入ガードが無いと無限再帰で落ちる。
+    「貼り直し中」の印を立てた状態で配色変更イベントを送り、貼り直しが
+    重ねて呼ばれないことを確かめる（``changeEvent`` の防御分岐）。
+    """
+    from PySide6.QtCore import QEvent
+
+    field = window.search_panel._input
+    field._reapplying_fixed_palette = True
+    applied: list[int] = []
+    field._apply_fixed_palette = lambda: applied.append(1)
+
+    field.changeEvent(QEvent(QEvent.Type.StyleChange))
+
+    assert applied == []

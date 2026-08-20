@@ -1,6 +1,6 @@
 """全タブ横断検索 (機能 6・7) のための、文字位置まわりの小さな純粋関数。
 
-検索は Python の文字列 (``QPlainTextEdit.toPlainText()`` の戻り値) に対して
+検索は Python の文字列 (``editor_app.editor.document_text()`` の戻り値) に対して
 行うが、見つかった位置は ``QTextCursor.setPosition()`` に渡して選択・置換する。
 ところが「文字列の長さ・位置」の数え方が Python と Qt で一致しない箇所が
 2 つあり、素直に書くと**本文の別の場所を書き換えてしまう**。

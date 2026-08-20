@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import shiboken6
 from PySide6.QtCore import QEvent, QObject
 from PySide6.QtWidgets import (
+    QLabel,
     QMainWindow,
     QMessageBox,
 )
@@ -15,6 +17,7 @@ from .dialogs import (
 )
 from .editor import EditorWidget
 from .file_commands import FileCommandsMixin, raise_window
+from .fileio import describe_encoding
 from .file_watch import FileWatchMixin
 from .menus import create_actions, create_menus
 from .search_replace import SearchReplaceMixin
@@ -37,6 +40,12 @@ REMEMBER_CHOICE_TEXT = "残りの未保存タブにも同じ操作を適用す�
 
 #: 未保存の変更があるタブの名前の先頭に付ける印
 MODIFIED_MARK = "*"
+
+#: 文字コードの判定が拮抗した（別の文字コードでも読めてしまった）ときに、
+#: ステータスバーの文字コード表示に付ける印。**作業を止めるダイアログには
+#: しない**（毎回止められては煩わしいだけで、いずれ読まずに閉じるようになる）。
+#: 気づきのきっかけとして印だけを出し、詳しい説明はツールチップに置く。
+AMBIGUOUS_ENCODING_MARK = "?"
 
 
 class MainWindow(
@@ -149,6 +158,11 @@ class MainWindow(
 
         self.setCentralWidget(self.tabs)
 
+        # 今のタブの文字コードを常時表示するステータスバー（実機
+        # フィードバックにより追加）。「文字コードを指定して保存」で
+        # 選び直したあと、いま何で保存されるのかが分かるようにするため。
+        self._setup_status_bar()
+
         # メニューとアクションの組み立ては menus.py が受け持つ
         # （どの操作がどのメニューにあるかを 1 か所で読めるようにするため）。
         # チェック付きの項目の初期状態だけはウィンドウ側の状態から決める。
@@ -166,8 +180,20 @@ class MainWindow(
     # ------------------------------------------------------------------
     @classmethod
     def open_windows(cls) -> list["MainWindow"]:
-        """現在開いている全ての MainWindow（生成順）。"""
-        return list(cls._open_windows)
+        """現在開いている全ての MainWindow（生成順）。
+
+        **Qt 側 (C++) が既に片付けられたウィンドウは、ここで一覧から
+        落とす。** 一覧から外れるのは :meth:`closeEvent` の中なので、
+        閉じる経路を通らずに片付けられた場合（アプリ終了時に Qt が
+        まとめて消す、テストの後始末など）は Python 側の窓口だけが
+        残る。それを配り続けると、受け取った側が ``self.tabs`` などに
+        触った瞬間に ``Internal C++ object ... already deleted`` で
+        落ちる（タブの移動先メニュー・IPC の転送先の判定が該当する）。
+        """
+        alive = [window for window in cls._open_windows if shiboken6.isValid(window)]
+        if len(alive) != len(cls._open_windows):
+            cls._open_windows[:] = alive
+        return list(alive)
 
     @classmethod
     def most_recently_active_window(cls) -> "MainWindow | None":
@@ -501,6 +527,10 @@ class MainWindow(
         # （実機フィードバックにより追加。複数ウィンドウの場合は最後に
         # 閉じたウィンドウの状態が残る）。
         save_window_geometry(self.saveGeometry())
+        # 閉じると決まった以上、保留中の「外部変更の再読み込み」は要らない。
+        # 止めておかないと、デバウンスの待ち時間のあいだに閉じられたとき、
+        # 閉じたはずのウィンドウが後から確認ダイアログを出そうとする。
+        self._cancel_pending_reloads()
         self.search_panel.close()
         if self in MainWindow._open_windows:
             MainWindow._open_windows.remove(self)
@@ -534,9 +564,60 @@ class MainWindow(
             self.tabs.setTabToolTip(index, self._tab_tooltip(editor))
             if index == self.tabs.currentIndex():
                 self._update_window_title()
+                self._update_encoding_status()
 
     def _on_current_tab_changed(self, _index: int) -> None:
         self._update_window_title()
+        self._update_encoding_status()
+
+    # ------------------------------------------------------------------
+    # ステータスバー（今のタブの文字コード）
+    # ------------------------------------------------------------------
+    def _setup_status_bar(self) -> None:
+        """ステータスバーに「今のタブの文字コード」の表示欄を用意する。
+
+        ``addPermanentWidget`` で右端に置くのは、メニュー項目にマウスを
+        乗せたときに出る説明（``QAction.setStatusTip``）で消されないように
+        するため（通常のメッセージ領域に置くと上書きされる）。
+        """
+        self._encoding_label = QLabel("", self)
+        self.statusBar().addPermanentWidget(self._encoding_label)
+        self._update_encoding_status()
+
+    def _update_encoding_status(self) -> None:
+        """文字コードの表示を、いま表示しているタブのものに合わせる。
+
+        呼び出し元は「タブが切り替わったとき」と「タブの表示状態が
+        変わったとき」の 2 か所だけ。文字コードの代入
+        （:attr:`~editor_app.editor.EditorWidget.encoding`）は後者の
+        シグナルを出すので、開く・再読み込み・文字コードを指定して保存の
+        どれで変わってもここへ流れてくる。
+        """
+        editor = self.current_editor()
+        if editor is None:
+            self._encoding_label.setText("")
+            self._encoding_label.setToolTip("")
+            return
+
+        name = describe_encoding(editor.encoding)
+        alternatives = editor.encoding_alternatives
+        if not alternatives:
+            self._encoding_label.setText(name)
+            self._encoding_label.setToolTip(
+                f"このタブの文字コード（保存もこの文字コードで行われます）: {name}"
+            )
+            return
+
+        others = "・".join(describe_encoding(enc) for enc in alternatives)
+        self._encoding_label.setText(f"{name} {AMBIGUOUS_ENCODING_MARK}")
+        self._encoding_label.setToolTip(
+            f"このタブの文字コード（保存もこの文字コードで行われます）: {name}\n\n"
+            f"{AMBIGUOUS_ENCODING_MARK} このファイルは {others} としても読めるため、"
+            f"{name} と判定したのは推測です。\n"
+            "本文が文字化けして見える場合は、「ファイル」→「文字コードを指定して"
+            f"開き直す」で {others} を選んでください。\n"
+            "（化けたまま編集して保存すると、ファイルが元に戻せなくなります）"
+        )
 
     def _update_window_title(self) -> None:
         editor = self.current_editor()

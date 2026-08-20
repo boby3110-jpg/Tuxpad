@@ -91,6 +91,11 @@ def test_find_repository_root_walks_up_to_dot_git(clone: Path) -> None:
     assert find_repository_root(nested / "updater.py") == clone
 
 
+def test_find_repository_root_accepts_the_repository_itself(clone: Path) -> None:
+    """リポジトリ直下そのものを渡されたら、それを返すこと（親から探し始めない）。"""
+    assert find_repository_root(clone) == clone
+
+
 def test_find_repository_root_returns_none_outside_git(tmp_path: Path) -> None:
     """git 管理外（tarball 等）では None を返し、更新機能を無効にできること。"""
     plain = tmp_path / "not-a-repo" / "editor_app"
@@ -136,6 +141,34 @@ def test_update_available_counts_new_commits(clone: Path, upstream: Path) -> Non
     assert status.count == 2
     assert status.has_update is True
     assert status.target  # 取り込む先の SHA が入っていること
+
+
+def test_update_is_looked_for_on_the_branch_we_are_on(clone: Path, upstream: Path) -> None:
+    """今いるブランチの更新だけを見ること（別のブランチの先端を掴まない）。
+
+    ``git fetch origin`` をブランチ名なしで呼ぶと、``FETCH_HEAD`` は
+    **origin の既定ブランチ**を指す（追跡設定の無いブランチにいる場合）。
+    その先端を取り込み先にしてしまうと、利用者のブランチに**別のブランチの
+    内容**を早送りしようとすることになる。ブランチ名を必ず添えること。
+    """
+    # upstream に main とは別のブランチ work を作り、両方に別々のコミットを積む。
+    git(upstream, "checkout", "-b", "work")
+    commit(upstream, "work.txt", "作業\n")
+    git(upstream, "checkout", "main")
+    commit(upstream, "main1.txt", "1\n")
+    commit(upstream, "main2.txt", "2\n")
+
+    # 利用側は work にいる（追跡設定は付けない＝ブランチ名なしの fetch と差が出る形）。
+    git(clone, "fetch", "origin")
+    git(clone, "checkout", "--no-track", "-b", "work", "origin/work")
+    git(upstream, "checkout", "work")
+    commit(upstream, "work2.txt", "作業 2\n")
+
+    status = check_for_updates(clone)
+    assert status.branch == "work"
+    assert status.state == STATE_UPDATE_AVAILABLE
+    assert status.count == 1  # work に積んだ 1 件だけ（main の 2 件ではない）
+    assert status.target == run_git(upstream, "rev-parse", "work").text
 
 
 def test_dirty_worktree_skips_check(clone: Path, upstream: Path) -> None:
@@ -413,6 +446,25 @@ def test_run_git_disables_interactive_credential_prompt(clone: Path) -> None:
     run_git(clone, "remote", "set-url", "origin", "https://127.0.0.1:1/repo.git")
     failed = run_git(clone, "fetch", "origin", "main", timeout=20)
     assert failed.ok is False
+
+
+def test_run_git_hardens_the_child_environment(clone: Path) -> None:
+    """git に渡す環境変数そのものを確かめる（間接的な確認では緩んでも気づけない）。
+
+    上の「到達不能なリモートで失敗する」だけだと、``GIT_TERMINAL_PROMPT`` が
+    ``1`` に緩んでも通ってしまう（接続自体が拒否されるため）。git のエイリアス
+    （``!`` で始まるとシェルで動く）に環境変数を表示させて、直接確かめる。
+    """
+    result = run_git(
+        clone,
+        "-c",
+        'alias.showenv=!echo "prompt=$GIT_TERMINAL_PROMPT ssh=$GIT_SSH_COMMAND locale=$LC_ALL"',
+        "showenv",
+    )
+    assert result.ok is True
+    assert "prompt=0" in result.text          # 資格情報を対話で聞かせない
+    assert "BatchMode=yes" in result.text     # ssh のパスフレーズ等も聞かせない
+    assert "locale=C" in result.text          # 出力を解析するのでロケール固定
 
 
 def test_run_git_gives_up_when_git_never_returns(clone: Path) -> None:

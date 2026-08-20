@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from PySide6.QtWidgets import QInputDialog, QTextEdit
 
 from editor_app.editor import DEFAULT_WRAP_COLUMN, DEFAULT_WRAP_MODE, WRAP_FIXED, WRAP_NONE, WRAP_WINDOW
@@ -107,9 +108,49 @@ def test_set_wrap_mode_saved_value_survives_reload(window: MainWindow) -> None:
     assert load_wrap_settings() == (WRAP_WINDOW, DEFAULT_WRAP_COLUMN)
 
 
+def test_switching_wrap_mode_without_a_column_keeps_the_chosen_column(
+    window: MainWindow,
+) -> None:
+    """文字数を指定せずにモードだけ変えても、決めてある文字数は消さない。
+
+    「40 文字で折り返す」に設定 → 「折り返さない」へ切り替え → もう一度
+    「指定文字数で折り返す」に戻す、という普通の操作で 40 が残ること。
+    `set_wrap_mode()` の `if column is not None:` がこれを守っているが、
+    34 回目まで、この行を外して**文字数を None で上書きしても全テストが
+    緑のまま**だった（変異 `vs-wrap-column-guard`）。
+    """
+    window.set_wrap_mode(WRAP_FIXED, column=40)
+
+    window.set_wrap_mode(WRAP_NONE)  # 文字数は指定しない
+
+    assert window._wrap_column == 40
+    assert load_wrap_settings() == (WRAP_NONE, 40)
+
+    window.set_wrap_mode(WRAP_FIXED)  # 戻したときも 40 のまま
+    assert load_wrap_settings() == (WRAP_FIXED, 40)
+
+
 def test_prompt_wrap_fixed_column_also_persists(window: MainWindow, monkeypatch) -> None:
     monkeypatch.setattr(QInputDialog, "getInt", staticmethod(lambda *a, **k: (12, True)))
 
     window._prompt_wrap_fixed_column()
 
     assert load_wrap_settings() == (WRAP_FIXED, 12)
+
+
+def test_unknown_wrap_mode_is_refused_instead_of_ignored(window: MainWindow) -> None:
+    """知らない折り返しモードは、黙って素通りさせずその場で失敗させる。
+
+    素通りさせると「設定したのに何も変わらない」だけの症状になり、
+    どこで取り違えたのかを追えなくなる（設定ファイルから読んだ値の
+    受け止めは ``settings.load_wrap_settings()`` 側で既定へ倒している
+    ので、ここまで来る時点で呼び出し側の取り違え）。
+    """
+    editor = window.current_editor()
+    editor.set_wrap_mode(WRAP_WINDOW)
+
+    with pytest.raises(ValueError):
+        editor.set_wrap_mode("うずまき")
+
+    # 画面の折り返しは、失敗する前のまま動かない。
+    assert editor.lineWrapMode() == QTextEdit.LineWrapMode.WidgetWidth

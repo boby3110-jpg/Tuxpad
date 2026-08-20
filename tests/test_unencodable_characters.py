@@ -232,3 +232,24 @@ def test_utf8_files_are_not_affected(
     assert window.save_editor(editor) is True
     assert captured_message == []
     assert path.read_text(encoding="utf-8") == "絵文字🍣も♡も大丈夫\n"
+
+
+def test_message_falls_back_to_the_raw_reason_without_spots(
+    window: MainWindow, tmp_path: Path, captured_message
+) -> None:
+    """該当箇所を特定できなかった場合は、例外の文言をそのまま出すこと。
+
+    ``find_unencodable`` が何も返さないのは通常は起きない（encode で
+    失敗した以上どこかにある）が、受け皿として理由だけは必ず伝わるように
+    してある。そこが空振りしていないことを固定しておく。
+    """
+    path = tmp_path / "sjis.txt"
+    editor = window.open_path(make_sjis_file(path, "本文\n"))
+    error = fileio.EncodingError("理由だけの例外です。", encoding="cp932")
+
+    window._report_unencodable_characters(editor, path, error)
+
+    title, text = captured_message[0]
+    assert title == "保存できません"
+    assert "理由だけの例外です。" in text
+    assert "該当する文字が" not in text

@@ -13,6 +13,19 @@ def test_default_search_input_lines(window: MainWindow) -> None:
     assert window.search_panel.input_visible_lines() == DEFAULT_SEARCH_INPUT_LINES
 
 
+def test_default_search_input_lines_is_six() -> None:
+    """既定は 6 行（元の 3 行の 2 倍）。
+
+    「検索欄が狭くて打ちにくい」という実機フィードバックへの対応で、
+    利用者の求めに応じて **3 行から 2 倍の 6 行**にした値。上の
+    ``test_default_search_input_lines`` は定数どうしを見比べているだけ
+    なので、**定数を 3 に戻しても緑のまま通る**（2026-08-18（37 回目）に
+    変異 `se-search-lines-default` が生き残って発覚）。利用者が頼んだ
+    値そのものなので、数字で固定しておく。
+    """
+    assert DEFAULT_SEARCH_INPUT_LINES == 6
+
+
 def test_set_input_visible_lines_resizes_both_input_and_replace_boxes(
     window: MainWindow,
 ) -> None:

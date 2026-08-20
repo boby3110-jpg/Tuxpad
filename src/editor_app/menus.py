@@ -61,6 +61,35 @@ def _create_file_actions(window: "MainWindow") -> None:
     window.action_save_as.setStatusTip("現在のタブを別名で保存します")
     window.action_save_as.triggered.connect(window.save_file_as)
 
+    # 文字コードを選び直して保存する（実機フィードバックにより追加）。
+    # Shift-JIS のファイルに絵文字などを貼ると保存できなくなるため、
+    # UTF-8 へ移す逃げ道がここになる。ショートカットは割り当てない
+    # （普段使う操作ではなく、Ctrl+Shift+S の押し間違いも避けたいため）。
+    window.action_save_with_encoding = QAction("文字コードを指定して保存(&E)...", window)
+    window.action_save_with_encoding.setStatusTip(
+        "文字コードを選び直して現在のタブを保存します"
+    )
+    window.action_save_with_encoding.triggered.connect(window.save_file_with_encoding)
+
+    # 文字コードを選び直して「開き直す」。ステータスバーに出る拮抗の印
+    # （別の文字コードでも読めてしまったファイル）を見た利用者が、
+    # その場で正しい読み方に切り替えられるようにするための逃げ道。
+    # 保存の対になるので、「文字コードを指定して保存」の隣に置く。
+    window.action_reopen_with_encoding = QAction("文字コードを指定して開き直す(&R)...", window)
+    window.action_reopen_with_encoding.setStatusTip(
+        "現在のタブを、選んだ文字コードでファイルから読み直します"
+    )
+    window.action_reopen_with_encoding.triggered.connect(window.reopen_file_with_encoding)
+
+    # 上書き前の控えからの復元（引き継ぎ ⑦）。**手作業のコピー&ペーストに
+    # させず、アプリの中だけで完結させる**のがこの項目の存在理由なので、
+    # 「バックアップフォルダを開く」ではなくここから復元まで行う。
+    window.action_restore_backup = QAction("バックアップから復元(&B)...", window)
+    window.action_restore_backup.setStatusTip(
+        "保存で上書きされる前の内容に、このタブのファイルを戻します"
+    )
+    window.action_restore_backup.triggered.connect(window.restore_from_backup)
+
     window.action_close_tab = QAction("タブを閉じる(&W)", window)
     # StandardKey.Close は環境によって内容が変わる（例えば実機の KDE (xcb)
     # では ['Ctrl+W', 'Close'] を返す）。テキストエディタで一般的な
@@ -290,6 +319,10 @@ def create_menus(window: "MainWindow") -> None:
     file_menu.addSeparator()
     file_menu.addAction(window.action_save)
     file_menu.addAction(window.action_save_as)
+    file_menu.addAction(window.action_save_with_encoding)
+    file_menu.addAction(window.action_reopen_with_encoding)
+    file_menu.addSeparator()
+    file_menu.addAction(window.action_restore_backup)
     file_menu.addSeparator()
     file_menu.addAction(window.action_close_tab)
     file_menu.addAction(window.action_quit)

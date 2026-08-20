@@ -13,8 +13,11 @@
 
 from __future__ import annotations
 
+import ast
 import re
+from pathlib import Path
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QMenu
@@ -131,6 +134,9 @@ def test_file_menu_contents(window):
         window.action_open,
         window.action_save,
         window.action_save_as,
+        window.action_save_with_encoding,
+        window.action_reopen_with_encoding,
+        window.action_restore_backup,
         window.action_close_tab,
         window.action_quit,
     ]
@@ -254,6 +260,37 @@ def test_menu_bar_hidden_by_toggle_and_persisted(window):
     window.set_menu_bar_visible(True)
     assert window.menuBar().isVisible()
     assert load_menu_bar_visible() is True
+
+
+def test_menu_bar_toggle_is_checked_while_the_menu_bar_is_visible(window, make_window):
+    """メニューバーが見えている間は、メニューの印も**入っている**こと。
+
+    `action_toggle_menu_bar` は `checkable=True` で作られるため、**初期値は
+    「印なし」**。実際の表示状態に合わせているのは
+    `_apply_menu_bar_visibility()` の `setChecked()` の 1 行だけ。ところが
+    既存のテストは「隠したあとに印が外れていること」しか見ておらず、
+    **初期値が偶然 False なので、この行を外しても全部緑のまま**だった
+    （34 回目に変異 `vs-menu-bar-sync-check` が生き残って発覚）。
+
+    印がずれると、利用者には「メニューバーは見えているのに印が付いて
+    いない」「Ctrl+M を 1 回押しても何も起きない（印を入れる方向に
+    動くだけ）」という形で出る。
+    """
+    assert window.menuBar().isVisible()
+    assert window.action_toggle_menu_bar.isChecked() is True
+
+    # 隠して戻したあとも、表示状態と印が一致していること。
+    window.set_menu_bar_visible(False)
+    assert window.action_toggle_menu_bar.isChecked() is False
+
+    window.set_menu_bar_visible(True)
+    assert window.menuBar().isVisible()
+    assert window.action_toggle_menu_bar.isChecked() is True
+
+    # あとから開いたウィンドウでも印が合っていること。
+    later = make_window()
+    assert later.menuBar().isVisible()
+    assert later.action_toggle_menu_bar.isChecked() is True
 
 
 def test_menu_bar_visibility_applies_to_all_windows(window, make_window):
@@ -394,3 +431,185 @@ def test_file_actions_are_connected(window, monkeypatch):
         "show_search_panel",
         "show_replace_panel",
     ]
+
+
+#: 「押したら、その名前どおりの処理が 1 つだけ呼ばれる」ことを固定する組。
+#: 上の ``test_file_actions_are_connected`` が見ている 7 つ以外を全部並べる。
+#: ここに無いのは (1) 引数を取る結線（折り返し・テーマ・読み込み先。専用の
+#: テストが上にある）と (2) ``action_quit``（結線先が ``QWidget.close`` で
+#: 差し替えられないため、下で実際に閉じることを見る）。
+REMAINING_WIRING = [
+    ("action_save_with_encoding", "save_file_with_encoding"),
+    ("action_reopen_with_encoding", "reopen_file_with_encoding"),
+    ("action_restore_backup", "restore_from_backup"),
+    ("action_search_input_height", "_prompt_search_input_lines"),
+    ("action_next_tab", "activate_next_tab"),
+    ("action_previous_tab", "activate_previous_tab"),
+    ("action_wrap_fixed", "_prompt_wrap_fixed_column"),
+    ("action_font", "_prompt_font"),
+    ("action_tab_width_fixed", "_prompt_fixed_tab_width"),
+    ("action_editor_bg_color", "_prompt_editor_background_color"),
+    ("action_editor_fg_color", "_prompt_editor_text_color"),
+    ("action_editor_color_reset", "_reset_editor_colors"),
+    ("action_tab_active_color", "_prompt_tab_active_color"),
+    ("action_tab_inactive_color", "_prompt_tab_inactive_color"),
+    ("action_tab_color_reset", "_reset_tab_colors"),
+    ("action_check_updates", "check_for_updates_manually"),
+]
+
+
+@pytest.mark.parametrize(
+    ("action_name", "method"), REMAINING_WIRING, ids=[name for name, _ in REMAINING_WIRING]
+)
+def test_remaining_actions_call_exactly_their_own_handler(
+    window, monkeypatch, action_name: str, method: str
+) -> None:
+    """メニューの項目が、**名前どおりの処理だけ**を呼ぶこと。
+
+    結線は ``menus.py`` の 1 行きりなので、**書き間違えても他のテストは
+    全部緑のまま**通る（2026-08-18（37 回目）に、ここに並ぶうち 6 つの
+    結線を切る・すり替える変異が生き残って発覚）。利用者から見ると
+    「押しても何も起きない」「押すと別のものが出る」——たとえば
+    **「バックアップから復元」を押したらファイル選択が開く**——という、
+    いちばん問い合わせになりやすい形の壊れ方になる。
+
+    ``REMAINING_WIRING`` に並ぶ**全ての処理**を先に差し替えておいてから
+    1 つだけ押すので、**すり替え**（別の処理につないだ）も捕まる。
+    """
+    called: list[str] = []
+    for _, other in REMAINING_WIRING:
+        monkeypatch.setattr(
+            type(window), other, lambda self, *a, _m=other, **kw: called.append(_m)
+        )
+
+    getattr(window, action_name).trigger()
+
+    assert called == [method]
+
+
+def test_quit_action_closes_the_window(window) -> None:
+    """「終了」で実際にウィンドウが閉じること。
+
+    結線先が ``QWidget.close``（Qt 側の処理）なので、上の差し替えでは
+    確かめられない。押した結果そのものを見る。**結線を外しても他の
+    テストは全部緑のまま**だった（変異 `mn-quit-connect`）。
+    """
+    assert window.isVisible()
+
+    window.action_quit.trigger()
+
+    assert not window.isVisible()
+
+
+# ----------------------------------------------------------------------
+# チェック付きの項目が、自分の状態をそのまま渡すこと
+# ----------------------------------------------------------------------
+
+#: 「印の付け外し」がそのまま設定になる項目。``lambda`` で
+#: ``isChecked()`` を渡しているので、**裏返して渡しても**他のテストは
+#: 緑のまま通っていた（2026-08-18（37 回目）の変異 3 件）。
+CHECKABLE_WIRING = [
+    ("action_toggle_menu_bar", "set_menu_bar_visible"),
+    ("action_show_line_breaks", "set_show_line_breaks"),
+    ("action_check_updates_on_startup", "set_check_updates_on_startup"),
+]
+
+
+@pytest.mark.parametrize(
+    ("action_name", "method"), CHECKABLE_WIRING, ids=[name for name, _ in CHECKABLE_WIRING]
+)
+def test_checkable_actions_pass_their_own_checked_state(
+    window, monkeypatch, action_name: str, method: str
+) -> None:
+    """押したあとの**印の状態と同じ値**が渡ること（逆でないこと）。
+
+    裏返っていると、利用者には「メニューの印は入ったのに、効き目は
+    切れている」（あるいはその逆）という形で出る。とくに
+    ``action_toggle_menu_bar`` は、印と実際の表示が食い違うと
+    **Ctrl+M を 1 回押しても戻らない**ことになる。
+    """
+    got: list[bool] = []
+    monkeypatch.setattr(type(window), method, lambda self, value: got.append(value))
+    action = getattr(window, action_name)
+
+    action.setChecked(False)
+    action.trigger()
+    assert action.isChecked() is True
+    assert got[-1] is True
+
+    action.trigger()
+    assert action.isChecked() is False
+    assert got[-1] is False
+
+
+def test_menu_bar_toggle_is_reachable_when_the_menu_bar_is_hidden(window) -> None:
+    """メニューバーを隠しても Ctrl+M で戻せること。
+
+    隠すと**この項目自体もメニューごと見えなくなる**ので、ウィンドウ
+    直下にも登録しておかないとショートカットが届かない（＝二度と
+    メニューバーを出せない）。``window.addAction()`` の 1 行を外しても
+    全テストが緑のままだった（変異 `mn-menu-bar-addaction`）。
+    """
+    assert window.action_toggle_menu_bar in window.actions()
+    # ショートカットの届く範囲はウィンドウ全体（既定値と同じだが、
+    # メニューの外から効かせるのが目的なので明示しておく）。
+    assert (
+        window.action_toggle_menu_bar.shortcutContext()
+        == Qt.ShortcutContext.WindowShortcut
+    )
+
+    window.set_menu_bar_visible(False)
+
+    assert not window.menuBar().isVisible()
+    assert window.action_toggle_menu_bar in window.actions()
+
+
+# ----------------------------------------------------------------------
+# 実機と offscreen で解決結果が違うショートカット
+# ----------------------------------------------------------------------
+
+#: ``QKeySequence.StandardKey`` のうち、**この環境 (offscreen) と実機
+#: (KDE/xcb) で別のキーに解決されるもの**。
+#:
+#: * ``Replace`` … offscreen では ``Ctrl+H`` だが、実機では ``Ctrl+R``。
+#:   2026-08-07 に実機で発覚し、``QKeySequence("Ctrl+H")`` を直に書く形へ
+#:   直した経緯がある。
+#: * ``Quit`` … offscreen では**空**（＝割り当て無し）だが、実機では
+#:   ``Ctrl+Q``。「終了に Ctrl+Q は誤操作しやすい」という実機
+#:   フィードバックで外した経緯がある。
+#:
+#: どちらも**この環境では素通りする**——``setShortcut`` を
+#: ``StandardKey`` へ戻しても ``test_replace_shortcut_is_ctrl_h`` も
+#: ``test_quit_has_no_shortcut`` も緑のまま通る（2026-08-18（37 回目）に
+#: 変異 `mn-replace-standard-key`・`mn-quit-shortcut` が生き残って発覚）。
+#: 実行してから確かめるのでは捕まえられないので、**書いてあるかどうか**を
+#: 構文木で見る。
+PLATFORM_DEPENDENT_STANDARD_KEYS = {"Replace", "Quit"}
+
+SOURCE_DIR = Path(__file__).resolve().parent.parent / "src"
+
+
+def test_platform_dependent_standard_keys_are_never_used() -> None:
+    """実機で別のキーになる ``StandardKey`` を使っていないこと。
+
+    文字列ではなく構文木で見ているので、この説明文のように**名前を
+    書いただけのもの**は引っかからない。
+    """
+    offenders: list[str] = []
+    for path in sorted(SOURCE_DIR.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute):
+                continue
+            if node.attr not in PLATFORM_DEPENDENT_STANDARD_KEYS:
+                continue
+            # ``QKeySequence.StandardKey.Replace`` の形だけを見る
+            # （``str.replace`` のようなメソッド名と取り違えないため）。
+            parent = node.value
+            if isinstance(parent, ast.Attribute) and parent.attr == "StandardKey":
+                offenders.append(f"{path.name}:{node.lineno} StandardKey.{node.attr}")
+
+    assert offenders == [], (
+        "実機 (KDE) で offscreen と違うキーに解決される StandardKey が使われている: "
+        + ", ".join(offenders)
+    )

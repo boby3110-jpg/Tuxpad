@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -637,3 +638,223 @@ class TestUsage:
 
     def test_script_is_executable(self):
         assert os.access(INSTALL_SH, os.X_OK)
+
+
+# ----------------------------------------------------------------------
+# README の「ディストロ別のパッケージ名」表と install.sh の食い違い
+# ----------------------------------------------------------------------
+
+README = REPO_ROOT / "README.md"
+
+#: README の表の行 → `--print-plan` に食わせる os-release の名前。
+#:
+#: 表の 1 列目は人が読む名前（「Debian / Ubuntu (apt)」）なので、行の
+#: 見分けには**必ず出てくるパッケージマネージャ名**を使う。
+README_ROW_TO_DISTRO = {
+    "(apt)": "debian",
+    "(dnf)": "fedora",
+    "(pacman)": "arch",
+    "(zypper)": "opensuse",
+}
+
+
+def readme_runtime_libraries() -> dict[str, set[str]]:
+    """README の表の「Qt 実行時ライブラリ」列（os-release の名前 → パッケージ）。"""
+    body = README.read_text(encoding="utf-8")
+    section = body.split("### ディストロ別のパッケージ名", 1)
+    assert len(section) == 2, "README に「### ディストロ別のパッケージ名」が無い"
+    table = section[1].split("\n### ", 1)[0]
+
+    found: dict[str, set[str]] = {}
+    for line in table.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = line.split("|")
+        if len(cells) < 6:
+            continue
+        for marker, distro in README_ROW_TO_DISTRO.items():
+            if marker in cells[1]:
+                found[distro] = set(re.findall(r"`([^`]+)`", cells[4]))
+    return found
+
+
+class TestReadmeDistroTable:
+    """README の表と `install.sh` が同じことを言っているか。
+
+    Qt の実行時ライブラリの一覧は、**`install.sh` の `RUNTIME_PKGS` と
+    README の表の 2 か所に同じ内容が書いてある**。片方だけ直すと、README を
+    見て手で入れた人だけが「起動しない」（`libEGL.so.1` が無い等）に
+    ぶつかる——`import PySide6.QtWidgets` の時点で落ちるので、利用者から見て
+    原因の分からない失敗になる。
+
+    比べるのは実行時ライブラリの列だけにしてある。PySide6 の列は README では
+    読みやすさのために省略形（``.qtgui`` のように前半を省く）で書いてあり、
+    openSUSE の列は Python のバージョンに追従する（``python313-`` 等）ので、
+    文字どおりの一致を求めると**README の書き方のほうを歪める**ことになる。
+    それらは既存のテスト（`test_debian_has_split_pyside6_modules_including_qtnetwork`
+    など）が `install.sh` の側で押さえている。
+    """
+
+    def test_readme_lists_every_supported_distro(self):
+        assert set(readme_runtime_libraries()) == set(README_ROW_TO_DISTRO.values())
+
+    @pytest.mark.parametrize("distro", sorted(README_ROW_TO_DISTRO.values()))
+    def test_runtime_libraries_match_install_sh(self, os_release, distro):
+        planned = set(plan_for(os_release(distro))["runtime_packages"].split())
+        documented = readme_runtime_libraries()[distro]
+
+        assert planned == documented, (
+            f"{distro}: README の表と install.sh の Qt 実行時ライブラリが違う。"
+            f" install.sh にだけある: {sorted(planned - documented)} /"
+            f" README にだけある: {sorted(documented - planned)}"
+        )
+
+
+# ----------------------------------------------------------------------
+# README の「主なオプション」表 ⇔ install.sh が実際に受け取るオプション
+# ----------------------------------------------------------------------
+
+#: README の表には出さなくてよいオプション。
+#:
+#: **免除は「利用者が使う場面が無い」ものだけ**にすること。書き忘れを
+#: 黙らせるために足すと、この見張りそのものが意味を失う。
+NOT_FOR_README = {
+    # /etc/os-release の代わりに読むファイルを差し替えるテスト専用の穴。
+    # このファイル自身の `plan_for()` が使っているだけで、利用者は使わない。
+    "--os-release",
+}
+
+
+def install_sh_options() -> set[str]:
+    """`install.sh` が実際に受け取るオプション（引数を捌く `case` の腕）。
+
+    ここが**真実**である。README も `--help` も、これに対する説明でしかない。
+    """
+    body = INSTALL_SH.read_text(encoding="utf-8")
+    # `while [ $# -gt 0 ]; do case "$1" in ... esac` の中だけを見る。
+    # ファイル全体から `-foo)` を拾うと、下のほうの実装（`case` を使った
+    # ディストロ判別など）まで混ざる。
+    block = re.search(
+        r"while \[ \$# -gt 0 \]; do\s*\n\s*case \"\$1\" in\n(.*?)\n\s*esac", body, re.S
+    )
+    assert block, "install.sh の引数を捌く case 文が見つからない（書き方が変わった？）"
+
+    found: set[str] = set()
+    for line in block.group(1).splitlines():
+        arm = re.match(r"\s*((?:-{1,2}[A-Za-z][A-Za-z0-9-]*\|?)+)\)", line)
+        if arm:
+            found.update(arm.group(1).split("|"))
+    return found
+
+
+def readme_documented_options() -> set[str]:
+    """README の「主なオプション」表に載っているオプション。"""
+    body = README.read_text(encoding="utf-8")
+    section = body.split("主なオプション:", 1)
+    assert len(section) == 2, "README に「主なオプション:」が無い"
+    # 表は次の見出しまで。
+    table = section[1].split("\n### ", 1)[0]
+
+    found: set[str] = set()
+    for line in table.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = line.split("|")
+        if len(cells) < 3:
+            continue
+        # 1 列目だけを見る。2 列目の説明文にも `--print-plan` のような
+        # 文字列は出てくるが、それは「表に行がある」ことにはならない。
+        found.update(
+            token
+            for token in re.findall(r"`([^`]+)`", cells[1])
+            if token.startswith("-")
+        )
+    return found
+
+
+def install_sh_help_options() -> set[str]:
+    """`install.sh --help` が挙げているオプション。
+
+    拾うのは**行の先頭に立っているもの**だけにする。ヘルプには
+    ``python3 -m venv --system-site-packages .venv`` のような
+    「やること」の説明も混ざっており、行のどこからでも `--foo` を拾うと
+    **他のコマンドの引数まで install.sh のオプションとして数えてしまう**。
+    """
+    help_text = run_install("--help").stdout
+
+    found: set[str] = set()
+    for line in help_text.splitlines():
+        # 使い方の例: `  ./install.sh --dev   # ...`
+        example = re.match(r"\s*\./install\.sh\s+(-{1,2}[A-Za-z][A-Za-z0-9-]*)", line)
+        if example:
+            found.add(example.group(1))
+            continue
+        # オプションの一覧: `  -h, --help            このヘルプ`
+        entry = re.match(
+            r"\s+(-{1,2}[A-Za-z][A-Za-z0-9-]*)(?:,\s*(-{1,2}[A-Za-z][A-Za-z0-9-]*))?(?:\s|$)",
+            line,
+        )
+        if entry:
+            found.update(g for g in entry.groups() if g)
+    return found
+
+
+class TestOptionsAreDocumented:
+    """使えるオプションと、説明に書いてあるオプションの食い違い。
+
+    どちらの向きの食い違いも、利用者から見て**原因の分からない失敗**になる。
+
+    * 説明に無いオプション … 使えるのに気づけない。`--python` がまさに
+      それだった（README の手動セットアップの例は openSUSE の
+      ``python3.13`` を使っているのに、``python3`` 以外を選ぶ手段が
+      README のどこにも書いていなかった）。
+    * 使えないのに説明にあるオプション … 書いてあるとおりに打つと
+      ``不明なオプション`` で止まる。
+
+    41 回目に足した README のショートカット表の見張りと同じ形で、
+    **両方向**を見る。真実は `install.sh` の `case` の腕であり、README と
+    `--help` はそれに対する説明として突き合わせている。
+    """
+
+    def test_options_are_actually_collected(self):
+        """突き合わせが「空 ⇔ 空」で素通りしていないことの担保。
+
+        `case` の書き方や README の見出しが変わって 1 つも集められなく
+        なると、以下のテストは**何も見ていないのに緑**になる。
+        """
+        options = install_sh_options()
+        assert len(options) >= 8, f"install.sh のオプションを集められていない: {options}"
+        assert "--print-plan" in options
+        assert len(readme_documented_options()) >= 8
+        assert len(install_sh_help_options()) >= 8
+
+    def test_every_option_is_in_the_readme_table(self):
+        missing = install_sh_options() - readme_documented_options() - NOT_FOR_README
+        assert not missing, (
+            f"install.sh で使えるのに README の「主なオプション」表に無い: {sorted(missing)}"
+        )
+
+    def test_readme_table_has_no_option_that_does_not_work(self):
+        bogus = readme_documented_options() - install_sh_options()
+        assert not bogus, (
+            f"README の表にあるのに install.sh が受け取らない: {sorted(bogus)}"
+            "（打つと「不明なオプション」で止まる）"
+        )
+
+    def test_every_option_is_in_the_help_text(self):
+        """`--help` は README を読まずに端末だけで済ませる人の唯一の窓口。"""
+        missing = install_sh_options() - install_sh_help_options()
+        assert not missing, f"install.sh --help が挙げていないオプション: {sorted(missing)}"
+
+    def test_help_text_has_no_option_that_does_not_work(self):
+        bogus = install_sh_help_options() - install_sh_options()
+        assert not bogus, f"--help にあるのに受け取らないオプション: {sorted(bogus)}"
+
+    def test_exemption_list_has_not_gone_stale(self):
+        """免除したオプションが、もう存在しないのに残っていないか。
+
+        取り残された名前は、次に同じ名前のオプションを足したときに
+        「README に書き忘れている」のを黙って見逃す。
+        """
+        gone = NOT_FOR_README - install_sh_options()
+        assert not gone, f"もう存在しないオプションが免除一覧に残っている: {sorted(gone)}"

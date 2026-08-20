@@ -38,10 +38,14 @@ from editor_app.editor import (
 from editor_app.settings import (
     DEFAULT_IPC_TARGET_MODE,
     DEFAULT_SEARCH_INPUT_LINES,
+    load_check_updates_on_startup,
     load_editor_colors,
     load_font_settings,
     load_ipc_target_mode,
+    load_menu_bar_visible,
     load_search_input_lines,
+    load_show_line_breaks,
+    load_tab_colors,
     load_theme,
     load_wrap_settings,
 )
@@ -146,6 +150,65 @@ def test_valid_editor_colors_still_load(broken_settings) -> None:
         "[editor]\ncustom_background=#ffffff\ncustom_foreground=#000000\n",
     )
     assert load_editor_colors() == (QColor("#ffffff"), QColor("#000000"))
+
+
+def test_invalid_tab_colors_fall_back_to_none(broken_settings) -> None:
+    """タブの色も、色名として解釈できない値は未設定 (None) 扱いにする。
+
+    エディタ本文の配色（1 つ上）と同じ守りがタブの側にも要る。素通り
+    させると**無効な QColor**（Qt では黒扱い）がそのままタブに塗られ、
+    ダークテーマだと「タブが真っ黒で、どれが開いているか分からない」に
+    なり得る。実際 ``_color_or_none`` の ``isValid()`` を外しても
+    2026-08-18（37 回目）まで全テストが緑のままだった。
+    """
+    broken_settings("[appearance]\ntab_active_color=zzz\ntab_inactive_color=#nothex\n")
+    assert load_tab_colors() == (None, None)
+
+
+def test_valid_tab_colors_still_load(broken_settings) -> None:
+    """上の裏返し。正しい色まで捨てていないこと。"""
+    broken_settings("[appearance]\ntab_active_color=#ffffff\ntab_inactive_color=#000000\n")
+    assert load_tab_colors() == (QColor("#ffffff"), QColor("#000000"))
+
+
+# --- 「切ったはずの設定」が入り直さないこと（type=bool） ----------------
+#
+# INI では真偽値は ``false`` という**文字列**で保存される。``type=bool``
+# を付けずに読むと ``QSettings.value()`` はその文字列を返し、
+# ``bool("false")`` は **True** なので「切ったはずの設定が、再起動すると
+# 入り直している」形の不具合になる。``type=str`` を落としたときの
+# 「起動しない」と違って**静かに元へ戻るだけ**なので、利用者は
+# 「設定が保存されない」としか分からない。
+
+
+@pytest.mark.parametrize(
+    ("body", "loader"),
+    [
+        ("[editor]\nshow_line_breaks=false\n", load_show_line_breaks),
+        ("[appearance]\nmenu_bar_visible=false\n", load_menu_bar_visible),
+        ("[update]\ncheck_on_startup=false\n", load_check_updates_on_startup),
+    ],
+    ids=["show_line_breaks", "menu_bar_visible", "check_updates_on_startup"],
+)
+def test_false_saved_in_the_ini_file_stays_off(broken_settings, body: str, loader) -> None:
+    """設定ファイルに ``false`` と書いてあれば、必ず False で返ること。"""
+    broken_settings(body)
+    assert loader() is False
+
+
+@pytest.mark.parametrize(
+    ("body", "loader"),
+    [
+        ("[editor]\nshow_line_breaks=true\n", load_show_line_breaks),
+        ("[appearance]\nmenu_bar_visible=true\n", load_menu_bar_visible),
+        ("[update]\ncheck_on_startup=true\n", load_check_updates_on_startup),
+    ],
+    ids=["show_line_breaks", "menu_bar_visible", "check_updates_on_startup"],
+)
+def test_true_saved_in_the_ini_file_stays_on(broken_settings, body: str, loader) -> None:
+    """上の裏返し。``true`` を False に倒していないこと。"""
+    broken_settings(body)
+    assert loader() is True
 
 
 # --- 値にカンマが入っているとき（list が返る） ------------------------

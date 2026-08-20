@@ -91,19 +91,21 @@ AMBIGUOUS_SJIS_TEXT = "実写\n"
 
 
 def test_shift_jis_wins_over_euc_jp_when_both_can_read_it(tmp_path: Path) -> None:
-    """どちらでも読めるバイト列は Shift-JIS として読む（判定の順序）。
+    """どちらでも読めるバイト列は、読んだ中身が日本語らしい方を採る。
 
     日本語レガシー文字コードは「無効なバイト列なら例外になる」ことを頼りに
-    順に試しているが、**両方とも例外にならないバイト列は実在する**。その
-    場合は先に試した方で決まってしまうので、順序そのものが判定結果になる。
-    ここが入れ替わると、Shift-JIS のファイルが黙って半角カタカナの羅列に
+    試しているが、**両方とも例外にならないバイト列は実在する**。ここが
+    入れ替わると、Shift-JIS のファイルが黙って半角カタカナの羅列に
     化けて開き、**そのまま保存すると化けた内容でファイルが上書きされる**
     （読めない訳ではないので、エラーにもならない）。
 
-    実際に扱うファイルはほぼ Shift-JIS なので、cp932 を先に試すこと。
+    この文面では cp932 の読み（全角 2 文字）の方が euc_jp の読み（半角カナ
+    2 文字）より点が高いので cp932 が採られる。**「先に試したから」ではない**
+    ——順序で決めていた頃の穴は
+    :func:`test_euc_jp_kana_text_is_not_read_as_shift_jis` を参照。
     """
     data = AMBIGUOUS_SJIS_TEXT.encode("cp932")
-    # 前提: euc_jp としても「読めてしまう」こと（読めないなら順序は関係ない）。
+    # 前提: euc_jp としても「読めてしまう」こと（読めないなら見分けは要らない）。
     assert data.decode("euc_jp") != AMBIGUOUS_SJIS_TEXT
 
     path = tmp_path / "ambiguous.txt"
@@ -114,8 +116,219 @@ def test_shift_jis_wins_over_euc_jp_when_both_can_read_it(tmp_path: Path) -> Non
     assert text == AMBIGUOUS_SJIS_TEXT
 
 
+#: cp932 としても**エラーにならずに読めてしまう** EUC-JP の日本語。
+#: EUC-JP のひらがなは 1 バイト目が ``0xA4`` で、cp932 ではこれが半角の
+#: 読点 ``､`` 1 文字として成立するため、**ひらがなを含む EUC-JP のファイルは
+#: ほぼ必ず cp932 としても「読めて」しまう**（この文面は ``､ｳ､ﾋ…`` に化ける）。
+AMBIGUOUS_EUCJP_TEXT = "こんにちは、世界。\n"
+
+
+def test_euc_jp_kana_text_is_not_read_as_shift_jis(tmp_path: Path) -> None:
+    """ひらがなを含む EUC-JP のファイルが、黙って cp932 に化けないこと。
+
+    判定を「先に試して読めた方」で決めていた頃（2026-08-16 まで）の穴。
+    cp932 を先に試していたので、**cp932 としても読めてしまう EUC-JP の
+    ファイルは全て cp932 と判定され**、``､ｳ､ﾋ､ﾁ､ﾏ`` のような半角記号の
+    羅列として開いていた。例外にならないので「開けません」にもならず、
+    化けていることにしか気づけない。しかも**このアプリ自身が「文字コードを
+    指定して保存」で EUC-JP を選ばせる**ので、自分で保存したファイルを
+    自分で開けない状態だった（JIS の不具合と同じ形）。
+
+    :func:`fileio.detect_encoding` を直接呼ぶ。``read_text_file`` 越しでは
+    その先の受け皿に助けられて素通りしうるため。
+    """
+    data = AMBIGUOUS_EUCJP_TEXT.encode("euc_jp")
+    # 前提: cp932 でも「読めてしまう」こと。ここが成り立たないと、この
+    # テストは見分けの仕組みを一切通らなくなり、意味を失う。
+    assert data.decode("cp932") != AMBIGUOUS_EUCJP_TEXT
+
+    assert fileio.detect_encoding(data) == "euc_jp"
+
+    path = tmp_path / "eucjp-kana.txt"
+    path.write_bytes(data)
+    text, encoding, _newline = fileio.read_text_file(path)
+    assert (text, encoding) == (AMBIGUOUS_EUCJP_TEXT, "euc_jp")
+
+
+def test_euc_jp_round_trip_via_write_and_read(tmp_path: Path) -> None:
+    """EUC-JP で保存したファイルを開き直すと、同じ本文・同じ文字コードになる。
+
+    「文字コードを指定して保存」で EUC-JP を選べる以上、**このアプリが
+    書いたファイルをこのアプリが読めない**のは通してはいけない。
+    """
+    path = tmp_path / "eucjp-round.txt"
+    fileio.write_text_file(path, AMBIGUOUS_EUCJP_TEXT, "euc_jp", "\n")
+
+    text, encoding, newline = fileio.read_text_file(path)
+
+    assert (text, encoding, newline) == (AMBIGUOUS_EUCJP_TEXT, "euc_jp", "\n")
+
+
+def test_euc_jp_hiragana_only_file_is_not_read_as_shift_jis() -> None:
+    """ひらがなだけの EUC-JP ファイルが cp932 に化けないこと。
+
+    このバイト列を cp932 として読むと ``､｢､､､ｦ､ｨ､ｪ`` になる。**半角の読点
+    ``､`` が 1 文字おきに並ぶ**のが EUC-JP のひらがなを誤読した跡で、
+    この半角記号を「半角カナと同じく日本語らしさの証拠」として数えて
+    しまうと、誤読の読み方が本物と同点になり cp932 に倒れる。
+    ``｡｢｣､･`` を点数から外してあるのはそのため。
+    """
+    data = "あいうえお\n".encode("euc_jp")
+    assert data.decode("cp932") != "あいうえお\n"  # 前提: cp932 でも読めてしまう
+
+    assert fileio.detect_encoding(data) == "euc_jp"
+
+
+def test_euc_jp_kanji_and_kana_mix_is_not_read_as_shift_jis() -> None:
+    """漢字とひらがなが 1 文字ずつの短い EUC-JP でも cp932 に化けないこと。
+
+    この長さになると、cp932 の誤読も「全角 1 文字＋半角カナ」という
+    それらしい見た目になり、**全角と半角カナが混ざった読み方を減点する規則**
+    が無いと本物と同点になって cp932 に倒れる。本物の半角カナのファイルは
+    半角カナだけで書かれているので、混ざっている方を誤読とみなしてよい。
+    """
+    for sample in ("私は\n", "字セ\n", "中え\n"):
+        data = sample.encode("euc_jp")
+        assert data.decode("cp932") != sample  # 前提: cp932 でも読めてしまう
+        assert fileio.detect_encoding(data) == "euc_jp", sample
+
+
+def test_halfwidth_kana_only_shift_jis_file_stays_shift_jis() -> None:
+    """半角カナだけの Shift-JIS ファイルが EUC-JP に化けないこと（引き分けの倒し方）。
+
+    ``ｶﾀｶﾅ`` のような半角カナだけのファイルは、cp932 の読み（半角カナ 4 文字）
+    も euc_jp の読み（漢字 2 文字）も**同じ点数**になり、日本語らしさでは
+    見分けられない。この引き分けを
+    :data:`fileio._STRICT_JAPANESE_ENCODINGS` の並び順（＝ cp932 が先）で
+    倒しているので、**並び順を入れ替えると、レガシーな半角カナのファイル
+    （固定長データ等）が黙って漢字の羅列に化ける**。
+
+    実際に扱うファイルはほぼ Shift-JIS なので、引き分けは cp932 に倒すこと。
+    """
+    for sample in ("ｶﾀｶﾅ\n", "ﾊﾝｶｸ\n", "ﾃﾞｰﾀ\n"):
+        data = sample.encode("cp932")
+        # 前提: euc_jp でも読めてしまうこと（＝引き分けの経路を実際に通る）。
+        assert data.decode("euc_jp") != sample
+        assert fileio.detect_encoding(data) == "cp932", sample
+
+
+def test_halfwidth_kana_only_euc_jp_file_is_read_as_shift_jis() -> None:
+    """【既知の限界】半角カナだけの EUC-JP ファイルは cp932 と判定する。
+
+    上のテストの裏側。同点になる以上どちらかは必ず外すので、**数の多い方
+    （Shift-JIS）を採る**という判断をここに残しておく。負けた側の挙動を
+    わざと固定しておくのは、将来この判定をいじった人が「直したつもりで、
+    よくある方を壊す」のを防ぐため。
+    """
+    data = "ｱｲｳｴｵ ｶｷｸｹｺ\n".encode("euc_jp")
+    assert data.decode("cp932")  # 前提: 両方で読める
+
+    assert fileio.detect_encoding(data) == "cp932"
+
+
 def test_detect_encoding_empty_bytes_is_utf8() -> None:
     assert fileio.detect_encoding(b"") == "utf-8"
+
+
+# ----------------------------------------------------------------------
+# ISO-2022-JP（JIS）… 「UTF-8 として読めてしまう」ので順序が全て
+# ----------------------------------------------------------------------
+def test_iso2022_jp_is_not_mistaken_for_utf8(tmp_path: Path) -> None:
+    """JIS のファイルが UTF-8 と判定されないこと。
+
+    ISO-2022-JP は全てのバイトが 0x80 未満なので、**UTF-8 としても必ず
+    「読めて」しまう**。「UTF-8 で読めたら UTF-8」と判定すると、JIS の
+    ファイルを開いた利用者には ``\\x1b$BF|K\\8l`` がそのまま並んで見える
+    （例外にならないので「開けません」にすらならない）。判定の順序が
+    入れ替わるとこれが再発するので、前提（UTF-8 でも読めること）ごと固定する。
+    """
+    data = LONG_JAPANESE_TEXT.encode("iso2022_jp")
+    # 前提: UTF-8 としても「読めてしまう」こと（これが無いとこのテストは
+    # ただの重複になる）。
+    assert data.decode("utf-8") != LONG_JAPANESE_TEXT
+
+    path = tmp_path / "jis.txt"
+    path.write_bytes(data)
+    text, encoding, _newline = fileio.read_text_file(path)
+
+    assert encoding == "iso2022_jp"
+    assert text == LONG_JAPANESE_TEXT
+
+
+def test_iso2022_jp_round_trip_via_write_and_read(tmp_path: Path) -> None:
+    """このアプリ自身が JIS で保存したファイルを、自分で開き直せること。
+
+    「文字コードを指定して保存」で JIS を選ばせている以上、ここが通らないと
+    **自分で保存したファイルが自分で開けない**（保存はできるのに、開くと化ける）。
+    """
+    path = tmp_path / "jis_roundtrip.txt"
+    fileio.write_text_file(path, LONG_JAPANESE_TEXT, "iso2022_jp", "\n")
+
+    text, encoding, newline = fileio.read_text_file(path)
+
+    assert text == LONG_JAPANESE_TEXT
+    assert encoding == "iso2022_jp"
+    assert newline == "\n"
+    assert path.read_bytes() == LONG_JAPANESE_TEXT.encode("iso2022_jp")
+
+
+def test_utf8_file_containing_the_escape_stays_utf8(tmp_path: Path) -> None:
+    """エスケープ列らしきバイトがあるだけの UTF-8 は、UTF-8 のまま読むこと。
+
+    見分けの目印 (``ESC $``) は UTF-8 のファイルにもたまたま入りうる
+    （端末の記録など）。目印だけで決め打ちすると、日本語の UTF-8 ファイルが
+    「JIS として読めません」で開けなくなる。実際に ISO-2022-JP として
+    読めたときだけ採用すること。
+    """
+    original = "ESC \x1b$ を含む日本語の UTF-8 ファイル\n"
+    path = tmp_path / "utf8_with_escape.txt"
+    path.write_bytes(original.encode())
+
+    text, encoding, _newline = fileio.read_text_file(path)
+
+    assert encoding == "utf-8"
+    assert text == original
+
+
+def test_ascii_only_iso2022_jp_file_is_read_as_utf8_without_damage(
+    tmp_path: Path,
+) -> None:
+    """中身が ASCII だけの JIS ファイルは UTF-8 扱いでよい（結果が同じため）。
+
+    2 バイト文字へ切り替えるエスケープ列が 1 つも無いなら、そのファイルの
+    バイト列は ASCII そのもの。UTF-8 として読んでも本文は 1 文字も変わらず、
+    保存してもバイト列は変わらない。**目印が無いものまで JIS と判定しに
+    行く必要は無い**ことの根拠なので、保存まで含めて固定しておく。
+    """
+    original = "ascii only, no escapes\n"
+    path = tmp_path / "ascii.txt"
+    path.write_bytes(original.encode("iso2022_jp"))
+
+    text, encoding, newline = fileio.read_text_file(path)
+    assert encoding == "utf-8"
+    assert text == original
+
+    fileio.write_text_file(path, text, encoding, newline)
+    assert path.read_bytes() == original.encode("iso2022_jp")
+
+
+def test_open_edit_save_keeps_iso2022_jp_encoding(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """JIS のファイルを開いて編集・保存しても JIS のままであること（機能 8）。"""
+    path = tmp_path / "jis-sample.txt"
+    original = LONG_JAPANESE_TEXT + "\n"
+    path.write_bytes(original.encode("iso2022_jp"))
+
+    editor = window.open_path(path)
+    assert editor is not None
+    assert editor.encoding == "iso2022_jp"
+    assert editor.toPlainText() == original
+
+    edit_text(editor, original + "追記した行\n")
+    assert window.save_editor(editor) is True
+
+    assert path.read_bytes() == (original + "追記した行\n").encode("iso2022_jp")
 
 
 # ----------------------------------------------------------------------
@@ -280,3 +493,30 @@ def test_open_edit_save_keeps_shift_jis_encoding(
 
     saved_bytes = path.read_bytes()
     assert saved_bytes == (original + "追記した行\n").encode("cp932")
+
+
+def test_open_edit_save_keeps_euc_jp_encoding(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """cp932 としても読めてしまう EUC-JP のファイルを、開く→編集→保存で保てること。
+
+    判定が cp932 に倒れていた頃は、**開いた時点で本文が半角記号の羅列に
+    化けており、保存するとその化けた内容で元のファイルが上書きされる**
+    （＝黙ってファイルを壊す）。ここは判定だけでなく、機能 8 の
+    「保存時は元の文字コードを保つ」まで通して固定する。
+    """
+    path = tmp_path / "eucjp-sample.txt"
+    original = AMBIGUOUS_EUCJP_TEXT
+    path.write_bytes(original.encode("euc_jp"))
+    # 前提: cp932 でも読めてしまうファイルであること。
+    assert original.encode("euc_jp").decode("cp932") != original
+
+    editor = window.open_path(path)
+    assert editor is not None
+    assert editor.encoding == "euc_jp"
+    assert editor.toPlainText() == original
+
+    edit_text(editor, original + "追記した行\n")
+    assert window.save_editor(editor) is True
+
+    assert path.read_bytes() == (original + "追記した行\n").encode("euc_jp")

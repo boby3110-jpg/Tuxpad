@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, Qt, QUrl
-from PySide6.QtWidgets import QMenu
+from PySide6.QtWidgets import QApplication, QMenu
 
 from editor_app.main_window import MainWindow
 from editor_app.tab_bar import MultiRowTabBar
@@ -42,6 +42,34 @@ def test_new_window_registers_itself(window: MainWindow) -> None:
 def test_closed_window_unregisters_itself(window: MainWindow) -> None:
     window.close()
     assert window not in MainWindow.open_windows()
+
+
+def test_torn_down_window_drops_out_of_the_list(qtbot) -> None:
+    """Qt 側が消えたウィンドウは、一覧から自動的に落ちること。
+
+    一覧から外れるのは ``closeEvent`` の中なので、**閉じる経路を通らずに
+    片付けられた**ウィンドウ（アプリ終了時に Qt がまとめて消す、テストの
+    後始末など）は Python 側の窓口だけが残る。それを配ってしまうと、
+    受け取った側（タブの移動先メニュー・IPC の転送先の判定）が
+    ``self.tabs`` に触った瞬間に ``RuntimeError`` で落ちる。
+    """
+    import shiboken6
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    window = MainWindow()
+    window.show()
+    assert window in MainWindow.open_windows()
+
+    # close() を通さずに Qt 側だけ消す。
+    window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert shiboken6.isValid(window) is False
+
+    remaining = MainWindow.open_windows()
+    assert window not in remaining
+    # 配られた窓口はどれも生きていて、そのまま触れること。
+    for other in remaining:
+        other.editors()
 
 
 # ----------------------------------------------------------------------
@@ -139,6 +167,83 @@ def test_move_tab_to_window_rewires_title_updates(make_window) -> None:
 
     index = win_b.tabs.indexOf(editor)
     assert win_b.tabs.tabText(index).startswith("*")
+
+
+def test_move_tab_to_window_brings_that_window_to_the_front(make_window) -> None:
+    """タブを移したら、移した先のウィンドウが手前に出る。
+
+    右クリックメニューの「別のウィンドウへ移動」で移すと、移動先が背面の
+    ままでは**タブがどこへ行ったのか分からない**（利用者からは「消えた」
+    ように見える）。既存のテストは「移動先にタブが入ったこと」しか見て
+    いないので、前面に出す処理を丸ごと外しても緑のままだった。
+
+    ``activateWindow()`` は通知を受け取るまで効かないので、
+    ``processEvents()`` を挟んでから確かめる（tests/test_ipc_target_mode.py
+    の ``_activate`` と同じ理由）。
+    """
+    win_a = make_positioned_window(make_window, 0, 0)
+    win_b = make_positioned_window(make_window, 2000, 0)
+    # 直前に手前にあるのは移動「元」の方にしておく。
+    win_a.activateWindow()
+    QApplication.processEvents()
+
+    editor = win_a.current_editor()
+    win_a._move_tab_to_window(editor, win_b)
+    QApplication.processEvents()
+
+    assert QApplication.activeWindow() is win_b
+
+
+def test_tear_off_disposes_of_the_new_windows_empty_tab(window: MainWindow) -> None:
+    """切り離し先の新しいウィンドウが起動時に作る空の無題タブは、捨てられる。
+
+    新しいウィンドウは必ず「無題-1」を 1 枚持って生まれるので、切り離しでは
+    それを取り除いてから移してくる。取り除くだけで**破棄まではしない**と、
+    行き場を失った空のタブが親無しのまま残り続ける（タブバーからは消えて
+    いるので誰も気づけない）。**切り離すたびに 1 枚ずつ積み上がる**ので、
+    タブを何度も分けて使う日は無駄が増えていく。
+
+    ここでは「この操作で新しく増えて、そのまま残った ``EditorWidget``」だけを
+    見る（``allWidgets()`` はアプリ全体を返すので、他のテストが開いている
+    ウィンドウの数に左右されないようにするため）。
+    """
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    from editor_app.editor import EditorWidget
+
+    def live_editors() -> set:
+        return {w for w in QApplication.allWidgets() if isinstance(w, EditorWidget)}
+
+    window.new_file()
+    editor = window.editors()[1]
+    before = live_editors()
+
+    new_window = window._tear_off_tab_to_new_window(editor, QPoint(300, 300))
+    # deleteLater() は待ち行列に積まれるだけなので、実際に片付くまで進める。
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    assert new_window is not None
+    assert new_window.tabs.count() == 1
+    assert live_editors() - before == set()
+
+
+def test_tear_off_keeps_the_new_window_on_screen(window: MainWindow) -> None:
+    """画面の左上すれすれで離しても、新しいウィンドウが画面外へ出ない。
+
+    切り離し先は「離した位置の少し左上」を左上隅にするので、そのまま計算
+    すると**画面の左や上をはみ出した位置**になる。はみ出すと環境によっては
+    タイトルバーに手が届かず、**ウィンドウを動かすことも閉じることも
+    できなくなる**（中のタブは未保存かもしれない）。負にならないよう
+    丸めてあることを固定する。
+    """
+    window.new_file()
+    editor = window.editors()[1]
+
+    new_window = window._tear_off_tab_to_new_window(editor, QPoint(10, 5))
+
+    assert new_window is not None
+    assert new_window.pos().x() >= 0
+    assert new_window.pos().y() >= 0
 
 
 def drag_tab(source: MainWindow, editor) -> None:

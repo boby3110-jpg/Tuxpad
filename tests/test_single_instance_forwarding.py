@@ -10,9 +10,21 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from PySide6.QtWidgets import QApplication
 
 from editor_app.app import _handle_forwarded_paths
 from editor_app.main_window import MainWindow
+
+
+def _activate(window: MainWindow) -> None:
+    """ウィンドウをアクティブにする（offscreen でも実際に切り替わる）。
+
+    ``tests/test_ipc_target_mode.py`` と同じ手法。``activateWindow()`` は
+    プラットフォームへ頼むだけなので、``processEvents()`` で通知を受け取る
+    まで ``QApplication.activeWindow()`` は入れ替わらない。
+    """
+    window.activateWindow()
+    QApplication.processEvents()
 
 
 def test_new_file_opens_in_primary_window(window: MainWindow, tmp_path: Path) -> None:
@@ -54,6 +66,30 @@ def test_already_open_file_in_other_window_is_focused_there(
     assert other.current_editor().path == sample.resolve()
     # 元々あったウィンドウ側には新しいタブが増えていない。
     assert window.find_editor_by_path(sample.resolve()) is None
+
+
+def test_already_open_file_in_other_window_raises_that_window(
+    window: MainWindow, make_window, tmp_path: Path
+) -> None:
+    """既に開いているファイルなら、**そのウィンドウ自体**を前面に出す。
+
+    上のテストは「そのタブが選ばれること」しか見ていないため、前面に出す
+    相手を取り違えて**別のウィンドウが手前に来ても緑のまま**通っていた
+    （34 回目に変異 `app-dedup-raise-owner` が生き残って発覚）。
+    利用者から見ると「ダブルクリックしたのに、そのファイルが見えている
+    ウィンドウが出てこない」という形で現れる。
+    """
+    sample = tmp_path / "sample.txt"
+    sample.write_text("内容", encoding="utf-8")
+    other = make_window()
+    other.open_path(sample)
+    _activate(window)  # 直前に手前にあったのは、ファイルを持っていない方。
+
+    _handle_forwarded_paths([str(sample)])
+    # `raise_window()` の `activateWindow()` も、通知を受け取るまでは効かない。
+    QApplication.processEvents()
+
+    assert QApplication.activeWindow() is other
 
 
 # ----------------------------------------------------------------------

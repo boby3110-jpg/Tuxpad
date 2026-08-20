@@ -325,6 +325,30 @@ def test_editor_ignores_a_drop_with_no_local_file(window: MainWindow) -> None:
     assert window.tabs.count() == before
 
 
+def test_editor_pastes_a_non_file_url_into_the_text(window: MainWindow) -> None:
+    """ローカルファイルでない URL は、本文への貼り付け（既定動作）に任せる。
+
+    上の ``test_editor_ignores_a_drop_with_no_local_file`` は**タブが増えない**
+    ことしか見ていない。振り分けを ``if urls:`` のように緩めても、
+    ``open_dropped_urls()`` の側が非ローカル URL を弾くのでタブは増えず、
+    テストは緑のまま通ってしまう。
+
+    だが実際には差が出る。振り分けが緩むと ``super().dropEvent()`` へ
+    降りなくなるので、**Web ブラウザからリンクを本文へ落としても何も
+    貼り付かない**（利用者から見ると「落としたのに無反応」）。
+    ここでは「素通りして本文に貼られる」ことまで固定する。
+    """
+    editor = window.current_editor()
+    editor.setPlainText("")
+    mime = QMimeData()
+    mime.setUrls([QUrl("https://example.com/not-a-file.txt")])
+    event = drop_event(mime)
+
+    editor.dropEvent(event)
+
+    assert "https://example.com/not-a-file.txt" in editor.toPlainText()
+
+
 # ----------------------------------------------------------------------
 # 閉じるときのガード（範囲外の位置・別ウィンドウのタブ）
 #

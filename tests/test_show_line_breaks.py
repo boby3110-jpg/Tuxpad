@@ -124,6 +124,28 @@ def test_mark_point_sits_at_the_end_of_its_line(window: MainWindow) -> None:
     assert rect.top() < point.y() <= rect.bottom()
 
 
+def test_mark_is_shifted_off_the_last_character(window: MainWindow) -> None:
+    """記号は行末の文字に重ねず、必ず少し右へずらして描くこと。
+
+    ``rect.left()`` は「行末＝最後の文字のすぐ右」なので、そこへそのまま
+    描くと ↓ が最後の 1 文字と接してしまう。「薄っすら見えるくらい」と
+    いう実機からの要望に対して、本文と混ざって読みにくくなるのはいちばん
+    避けたい形なので、間隔 (``_LINE_BREAK_MARK_GAP``) を空けている。
+
+    上の ``test_mark_point_sits_at_the_end_of_its_line`` は
+    ``rect.left() <= point.x()`` という**下限を含む**幅で見ているため、
+    間隔を 0 にしても赤くならない。ここで「必ず右へずれている」ことだけを
+    別に固定する。
+    """
+    editor = window.current_editor()
+    _prepare(editor, "あいう\nかきく")
+    editor.set_show_line_breaks(True)
+
+    (point,) = editor.line_break_mark_points()
+
+    assert point.x() > _end_of_block_rect(editor, 0).left()
+
+
 def test_soft_wrap_boundary_does_not_get_a_mark(window: MainWindow) -> None:
     """折り返しは「改行」ではないので記号を描かない。
 
