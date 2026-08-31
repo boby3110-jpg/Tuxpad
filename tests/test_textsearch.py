@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from editor_app.textsearch import (
+    LineNumbers,
     MatchSpan,
     find_matches,
     line_number_at,
@@ -112,6 +113,64 @@ def test_find_matches_length_changing_char_keeps_positions() -> None:
 def test_line_number_at(position: int, expected: int) -> None:
     #            0123 4567 8
     assert line_number_at("aaa\nbbb\nccc", position) == expected
+
+
+# ----------------------------------------------------------------------
+# LineNumbers（行番号を続きから数える方）
+# ----------------------------------------------------------------------
+#: 行番号を数える対象。空行・末尾の改行・複数行を含めておく。
+LINES_TEXT = "aaa\nbbb\n\nccc\nddd\n"
+
+
+def test_line_numbers_agrees_with_line_number_at_when_ascending() -> None:
+    """昇順に訊く限り、1 件ずつ数え直す line_number_at と必ず同じ答えになる。"""
+    counter = LineNumbers(LINES_TEXT)
+    for position in range(len(LINES_TEXT) + 1):
+        assert counter.line_at(position) == line_number_at(LINES_TEXT, position)
+
+
+def test_line_numbers_agrees_when_asked_out_of_order() -> None:
+    """位置が前に戻る訊き方をされても、答えを間違えない（数え直す）。"""
+    counter = LineNumbers(LINES_TEXT)
+    assert counter.line_at(12) == line_number_at(LINES_TEXT, 12)
+    assert counter.line_at(0) == 1
+    assert counter.line_at(4) == 2
+    # 戻ったあとも、そこから先を続けて正しく答える。
+    assert counter.line_at(12) == line_number_at(LINES_TEXT, 12)
+
+
+def test_line_numbers_repeated_same_position() -> None:
+    """同じ位置を何度訊いても、行番号が増えていかない。"""
+    counter = LineNumbers(LINES_TEXT)
+    assert counter.line_at(5) == 2
+    assert counter.line_at(5) == 2
+    assert counter.line_at(5) == 2
+
+
+def test_line_numbers_does_not_rescan_from_the_start() -> None:
+    """先頭から数え直していない（＝件数が増えても手間が増え続けない）ことを、
+    本文をなぞった総量で見張る。
+
+    これを外すと 2 万件の検索で数秒かかる実装に戻ってしまう
+    （引き継ぎ ⑨ の「応答なし」の主因）。本文を 1 度なぞる以上の量を
+    数えていたら落ちる。
+    """
+
+    class CountingText(str):
+        """``count("\n", start, end)`` で見た文字数を積み上げる str。"""
+
+        scanned = 0
+
+        def count(self, sub, start=0, end=None):  # noqa: D102
+            end = len(self) if end is None else end
+            type(self).scanned += max(0, end - start)
+            return str.count(self, sub, start, end)
+
+    text = CountingText("x\n" * 500)
+    counter = LineNumbers(text)
+    for position in range(0, len(text), 2):
+        counter.line_at(position)
+    assert CountingText.scanned <= len(text)
 
 
 # ----------------------------------------------------------------------

@@ -126,6 +126,37 @@ def line_number_at(text: str, position: int) -> int:
     return text.count("\n", 0, position) + 1
 
 
+class LineNumbers:
+    """同じ本文について、行番号を**位置の昇順に**次々と答える。
+
+    :func:`line_number_at` は毎回「先頭から ``position`` まで」を数え直すので、
+    1 件あたりの手間が本文の大きさに比例する。マッチが何万件もあると
+    「本文の大きさ × 件数」になり、2 万件で数秒かかっていた（実機で
+    「検索・置換すると数秒〜数十秒応答なしになる」と報告された原因）。
+
+    :meth:`line_at` は **前回どこまで数えたか**を覚えていて、そこから
+    今回の位置までの改行だけを足す。マッチは前から順に見つかる
+    (:func:`find_matches`) ので、全件を回しても本文を 1 度なぞるだけで済む。
+
+    位置が前へ戻る呼び方をされたときは、黙って間違えるより遅い方がよいので
+    :func:`line_number_at` で数え直す（答えは常に同じになる）。
+    """
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        #: ここまでは数え終わっている（この位置の行番号が ``_line``）。
+        self._scanned = 0
+        self._line = 1
+
+    def line_at(self, position: int) -> int:
+        """``position`` (Python の文字位置) が何行目かを 1 始まりで返す。"""
+        if position < self._scanned:
+            return line_number_at(self._text, position)
+        self._line += self._text.count("\n", self._scanned, position)
+        self._scanned = position
+        return self._line
+
+
 def line_snippet(text: str, position: int, length: int, newline_glyph: str) -> str:
     """検索結果の一覧に出すプレビュー文字列を切り出す。
 

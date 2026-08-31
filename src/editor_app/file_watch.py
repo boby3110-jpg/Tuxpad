@@ -73,6 +73,10 @@ class FileWatchMixin:
         self._pending_reload_paths: set[str] = set()
         #: 再読み込みの確認ダイアログを表示中のパス（多重表示を防ぐ）。
         self._reload_prompt_active: set[str] = set()
+        #: 途中で Qt へ制御を戻す長い処理（全置換など）の実行中かどうか。
+        #: 立っている間は再読み込みの確認を出さず、後回しにする
+        #: （:meth:`_process_pending_reloads` を参照）。
+        self._long_operation_active = False
 
     def _refresh_file_watches(self) -> None:
         """このウィンドウの開いているファイルのパスを、監視対象と一致させる。
@@ -169,6 +173,14 @@ class FileWatchMixin:
         あるため、発火した側でも一度確かめる。
         """
         if not shiboken6.isValid(self):
+            return
+        # 全置換のように「途中で Qt へ制御を戻しながら本文を書き換える」
+        # 処理の最中は、確認を出さずに後回しにする。ここで本文を丸ごと
+        # 入れ替えてしまうと、置換の残りが別の本文に対して走ることになる
+        # （引き継ぎ ⑨ でバッチ化したときに初めて起こりうるようになった）。
+        # 保留中のパスは消さずに残し、少し待ってからやり直す。
+        if self._long_operation_active:
+            self._reload_check_timer.start()
             return
         paths = list(self._pending_reload_paths)
         self._pending_reload_paths.clear()

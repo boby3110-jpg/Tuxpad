@@ -37,11 +37,11 @@ import time
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QTextCursor
 
-from .dialogs import prompt_int
+from .dialogs import ProgressReporter, prompt_int
 from .editor import center_cursor_vertically, document_text
 from .search_panel import NEWLINE_GLYPH, SearchMatch, SearchPanel
 from .settings import save_search_input_lines
-from .textsearch import find_matches, fold_case, line_number_at, line_snippet
+from .textsearch import LineNumbers, find_matches, fold_case, line_snippet
 
 #: 本文が編集されてから検索し直すまでの待ち時間 (ms)。連続入力の途中で
 #: 何度も全タブを走査しないよう、最後の入力からこれだけ待ってまとめて行う。
@@ -57,6 +57,16 @@ SLOW_SEARCH_REFRESH_MS = 300
 #: 間引く。**件数表示・ジャンプ・置換は全件を対象にしたままにすること**
 #: （間引きが検索結果の正しさに影響してはいけない）。
 MAX_HIGHLIGHTED_MATCHES = 500
+
+#: 全置換で、この件数ごとに Qt へ制御を戻す（進み具合の描き直しと「中止」
+#: ボタンの受け付け）。小さくするほど反応がよくなるが、そのぶん置換自体は
+#: 遅くなる。2 万件で 100 回ほど戻る見当。
+REPLACE_BATCH_SIZE = 200
+
+#: 全置換の対象がこの件数を超えたら、進み具合の窓（中止つき）を出して
+#: 少しずつ置換する。これ以下なら一瞬で終わるので、今までどおり黙って
+#: 一気に置換する（窓が一瞬ちらつく方が鬱陶しいため）。
+REPLACE_PROGRESS_MIN_MATCHES = 1000
 
 
 def _selection_matches(cursor: QTextCursor, expected: str) -> bool:
@@ -281,6 +291,10 @@ class SearchReplaceMixin:
         for index, editor in enumerate(self.editors()):
             title = self._tab_title(editor)
             text = document_text(editor)
+            # 行番号は 1 件ごとに「先頭から数え直す」と、件数が多いときに
+            # 本文の大きさ×件数の手間になる（2 万件で数秒）。マッチは前から
+            # 順に返ってくるので、数えた場所を覚えておいて続きから足す。
+            lines = LineNumbers(text)
             for span in find_matches(text, query):
                 matches.append(
                     SearchMatch(
@@ -288,7 +302,7 @@ class SearchReplaceMixin:
                         tab_title=title,
                         position=span.position,
                         length=span.length,
-                        line=line_number_at(text, span.py_position),
+                        line=lines.line_at(span.py_position),
                         snippet=line_snippet(
                             text, span.py_position, span.py_length, NEWLINE_GLYPH
                         ),
@@ -358,12 +372,38 @@ class SearchReplaceMixin:
         if not replaced:
             self.search_panel.show_stale_notice()
 
+    def _make_replace_progress(self, total: int) -> ProgressReporter | None:
+        """全置換の進み具合を見せる窓を作る（少量なら None ＝出さない）。
+
+        テストから差し替えられるよう、生成をこのメソッドに切り出してある。
+        """
+        if total < REPLACE_PROGRESS_MIN_MATCHES:
+            return None
+        return ProgressReporter(
+            self,
+            title="全置換",
+            label=f"{total} 件を置換しています...",
+            total=total,
+        )
+
     def _replace_all_matches(self) -> None:
         """検索語に一致する全件を一括で置換し、置換件数をパネルに表示する。
 
         1 つのタブ内で複数件を置換しても、そのタブでは Ctrl+Z 一回で
         まとめて元に戻せるように、タブ（エディタ）ごとに
         ``beginEditBlock()``/``endEditBlock()`` で 1 つの Undo 単位にまとめる。
+
+        件数が多い（:data:`REPLACE_PROGRESS_MIN_MATCHES` 以上）ときは、
+        :data:`REPLACE_BATCH_SIZE` 件ごとに Qt へ制御を戻しながら進める
+        （引き継ぎ ⑨）。こうしないと 2 万件の置換の間ウィンドウが再描画
+        されず「応答なし」に見え、やめる手立ても無かった。制御を戻している
+        間に本文を打ち替えられないよう、進み具合の窓はアプリ全体をモーダルに
+        して出す。**それでもタイマー等は動く**ので、置換の一件ごとの
+        「本当にそこに検索語があるか」の確認 (:meth:`_apply_replacement` の
+        ``expected``) は、これまでにも増して外してはいけない。
+
+        「中止」が押されたら、**そこまでの置換は残したまま**やめる
+        （タブごとに Ctrl+Z 一回で元に戻せる状態は保たれる）。
         """
         self._ensure_search_current()
         query = self.search_panel.query()
@@ -379,30 +419,60 @@ class SearchReplaceMixin:
             matches_by_editor.setdefault(match.editor_index, []).append(match)
 
         replaced_count = 0
+        canceled = False
         # 置換で本文が変わるたびに検索し直さないよう、この間は止めておく
-        # （最後にまとめて 1 回だけ検索し直す）。
+        # （最後にまとめて 1 回だけ検索し直す）。制御を Qt へ戻すので、
+        # 既に動き出しているタイマーも先に止めておくこと（止めないと置換の
+        # 途中で全タブ走査が挟まる）。
+        self._search_refresh_timer.stop()
         self._suspend_search_refresh = True
+        # 外部変更の「再読み込みしますか？」が置換の途中で割り込むと、本文が
+        # 丸ごと入れ替わった上に置換を続けることになる。この印を見て、
+        # ``file_watch`` 側が確認を先送りする。
+        self._long_operation_active = True
+        progress = self._make_replace_progress(len(matches))
         try:
+            done = 0
             for editor_index, editor_matches in matches_by_editor.items():
                 if not (0 <= editor_index < len(editors)):
+                    done += len(editor_matches)
                     continue
                 editor = editors[editor_index]
                 cursor = editor.textCursor()
                 cursor.beginEditBlock()
-                # 同じタブ内で先に置換すると後続マッチの position がずれるので、
-                # 文書の後ろ側 (position が大きい方) から処理する。
-                for match in sorted(
-                    editor_matches, key=lambda m: m.position, reverse=True
-                ):
-                    if self._apply_replacement(match, replacement, expected=query):
-                        replaced_count += 1
-                cursor.endEditBlock()
+                try:
+                    # 同じタブ内で先に置換すると後続マッチの position が
+                    # ずれるので、文書の後ろ側 (position が大きい方) から処理する。
+                    for match in sorted(
+                        editor_matches, key=lambda m: m.position, reverse=True
+                    ):
+                        if self._apply_replacement(match, replacement, expected=query):
+                            replaced_count += 1
+                        done += 1
+                        if progress is not None and done % REPLACE_BATCH_SIZE == 0:
+                            if not progress.advance(done):
+                                canceled = True
+                                break
+                finally:
+                    # 途中でやめても Undo の単位は必ず閉じる（開いたままだと
+                    # 以降の編集がこの塊に吸い込まれる）。
+                    cursor.endEditBlock()
+                if canceled:
+                    break
         finally:
+            if progress is not None:
+                progress.close()
+            self._long_operation_active = False
             self._suspend_search_refresh = False
 
         self._search_refresh_timer.stop()
         self._run_search(self.search_panel.query())
-        self.search_panel.show_replacement_summary(replaced_count)
+        self.search_panel.show_replacement_summary(replaced_count, canceled=canceled)
+        if canceled:
+            # 中止したときは検索語がまだ本文に残っている。残りがどこかを
+            # 見せたいので、_run_search が付けたハイライト（＝検索語）を
+            # そのままにしておく。
+            return
         # 検索語 (query) はもう本文に無いはずなので、代わりに置換後の文字列を
         # ハイライトして、どこが変わったか一目で分かるようにする。
         self._apply_match_highlights(self.search_all_tabs(replacement), None)

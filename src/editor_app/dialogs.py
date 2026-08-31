@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import difflib
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QColorDialog,
     QDialog,
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPlainTextEdit,
+    QProgressDialog,
     QVBoxLayout,
 )
 
@@ -331,3 +334,53 @@ def prompt_font(
     if chosen_size < 1:
         chosen_size = size
     return font.family(), chosen_size
+
+
+class ProgressReporter:
+    """時間のかかる処理の進み具合を見せ、「中止」を受け付ける小さな窓。
+
+    全置換（機能 7）のように、**何万件も順に書き換える**処理のために用意した
+    もの（引き継ぎ ⑨）。何も出さずに黙って回すと、その間ウィンドウが再描画
+    されず「応答なし」に見えるうえ、途中でやめる手立てが無い。
+
+    使い方は「一定件数ごとに :meth:`advance` を呼び、その戻り値が False
+    （＝中止された）ならやめる」だけ。:meth:`advance` の中で Qt に制御を
+    戻す（描画とボタン操作を処理させる）ので、**呼んだ側は「その隙に
+    本文が変わっているかもしれない」前提で書くこと**。
+
+    窓はアプリ全体をモーダルにして出す。処理中に本文を打ち替えられると、
+    置換の途中で位置がずれてしまうため、「中止」以外の操作は受け付けない。
+    """
+
+    def __init__(self, parent, *, title: str, label: str, total: int) -> None:
+        self._dialog = QProgressDialog(label, "中止", 0, total, parent)
+        self._dialog.setWindowTitle(title)
+        self._dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        # 既定では「短い処理なら出さない」ために少し待つが、ここへ来る時点で
+        # 長い処理だと分かっているので、すぐ出す。
+        self._dialog.setMinimumDuration(0)
+        # 最後の 1 件で勝手に閉じたり 0 に戻ったりされると、呼んだ側が
+        # 片付ける前に窓が消えて紛らわしいので、どちらも自分で行う。
+        self._dialog.setAutoClose(False)
+        self._dialog.setAutoReset(False)
+        self._dialog.setValue(0)
+
+    def advance(self, value: int) -> bool:
+        """進み具合を ``value`` 件まで進める。**中止されていなければ True**。
+
+        Qt に制御を戻すので、この呼び出しの前後で本文・タブの状態が変わって
+        いる可能性がある（モーダルなので利用者が打ち替えることはできないが、
+        タイマー等は動く）。
+        """
+        self._dialog.setValue(value)
+        QApplication.processEvents()
+        return not self._dialog.wasCanceled()
+
+    def was_canceled(self) -> bool:
+        """「中止」が押されていたら True。"""
+        return self._dialog.wasCanceled()
+
+    def close(self) -> None:
+        """窓を閉じる。処理が終わったら（例外で抜けるときも）必ず呼ぶこと。"""
+        self._dialog.close()
+        self._dialog.deleteLater()

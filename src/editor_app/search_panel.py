@@ -386,13 +386,20 @@ class SearchPanel(QWidget):
         """
         self._count_label.setText(STALE_RESULT_NOTICE)
 
-    def show_replacement_summary(self, count: int) -> None:
+    def show_replacement_summary(self, count: int, *, canceled: bool = False) -> None:
         """全置換が完了したことと、置換した件数をパネルに表示する。
 
         ``set_matches()`` の後に呼ぶ想定（全置換の結果、通常マッチ件数は
         変わっている＝その表示を、置換件数の表示で上書きする）。
+
+        ``canceled`` を立てると「途中でやめた」ことも併せて伝える
+        （件数が多いときの進み具合の窓で「中止」が押された場合。引き継ぎ ⑨）。
+        黙って件数だけ出すと、残りも置換できたと誤解される。
         """
-        self._count_label.setText(f"{count} 件を置換しました")
+        text = f"{count} 件を置換しました"
+        if canceled:
+            text += "（中止しました）"
+        self._count_label.setText(text)
 
     # ------------------------------------------------------------------
     # 内部
