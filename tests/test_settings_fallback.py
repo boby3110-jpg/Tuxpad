@@ -38,6 +38,7 @@ from editor_app.editor import (
 from editor_app.settings import (
     DEFAULT_IPC_TARGET_MODE,
     DEFAULT_SEARCH_INPUT_LINES,
+    load_beep_on_no_match,
     load_check_updates_on_startup,
     load_editor_colors,
     load_font_settings,
@@ -187,8 +188,14 @@ def test_valid_tab_colors_still_load(broken_settings) -> None:
         ("[editor]\nshow_line_breaks=false\n", load_show_line_breaks),
         ("[appearance]\nmenu_bar_visible=false\n", load_menu_bar_visible),
         ("[update]\ncheck_on_startup=false\n", load_check_updates_on_startup),
+        ("[search]\nbeep_on_no_match=false\n", load_beep_on_no_match),
     ],
-    ids=["show_line_breaks", "menu_bar_visible", "check_updates_on_startup"],
+    ids=[
+        "show_line_breaks",
+        "menu_bar_visible",
+        "check_updates_on_startup",
+        "beep_on_no_match",
+    ],
 )
 def test_false_saved_in_the_ini_file_stays_off(broken_settings, body: str, loader) -> None:
     """設定ファイルに ``false`` と書いてあれば、必ず False で返ること。"""
@@ -202,8 +209,14 @@ def test_false_saved_in_the_ini_file_stays_off(broken_settings, body: str, loade
         ("[editor]\nshow_line_breaks=true\n", load_show_line_breaks),
         ("[appearance]\nmenu_bar_visible=true\n", load_menu_bar_visible),
         ("[update]\ncheck_on_startup=true\n", load_check_updates_on_startup),
+        ("[search]\nbeep_on_no_match=true\n", load_beep_on_no_match),
     ],
-    ids=["show_line_breaks", "menu_bar_visible", "check_updates_on_startup"],
+    ids=[
+        "show_line_breaks",
+        "menu_bar_visible",
+        "check_updates_on_startup",
+        "beep_on_no_match",
+    ],
 )
 def test_true_saved_in_the_ini_file_stays_on(broken_settings, body: str, loader) -> None:
     """上の裏返し。``true`` を False に倒していないこと。"""

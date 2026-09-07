@@ -278,6 +278,19 @@ def _create_settings_actions(window: "MainWindow") -> None:
     )
     window.addAction(window.action_toggle_menu_bar)
 
+    # 検索・置換でヒットが 1 件も無かったときに音を鳴らす（引き継ぎ ⑪）。
+    # 件数欄の「見つかりません」だけでは気づきにくい、という要望への対応。
+    # 音が邪魔な場面もあるので、ここで切れるようにしてある。
+    window.action_beep_on_no_match = QAction(
+        "ヒットなしのときに音を鳴らす(&P)", window, checkable=True
+    )
+    window.action_beep_on_no_match.setStatusTip(
+        "検索・置換で 1 件も見つからなかったときに、音を鳴らして知らせます"
+    )
+    window.action_beep_on_no_match.triggered.connect(
+        lambda: window.set_beep_on_no_match(window.action_beep_on_no_match.isChecked())
+    )
+
     # アプリ内アップデート確認（git clone で導入した利用PCが、開発PCの
     # 更新を取り込むためのもの）。中身は update_check.py が受け持つ。
     window.action_check_updates = QAction("更新を確認(&C)...", window)
@@ -379,4 +392,5 @@ def create_menus(window: "MainWindow") -> None:
     update_menu.addAction(window.action_check_updates_on_startup)
 
     settings_menu.addSeparator()
+    settings_menu.addAction(window.action_beep_on_no_match)
     settings_menu.addAction(window.action_toggle_menu_bar)

@@ -205,6 +205,13 @@ def test_settings_menu_submenus(window):
     ]
 
 
+def test_settings_menu_has_no_match_beep_toggle(window):
+    """「設定」に「ヒットなしのときに音を鳴らす」のトグルがあること（引き継ぎ ⑪）。"""
+    menu = find_menu(window, "設定")
+    assert window.action_beep_on_no_match in menu.actions()
+    assert window.action_beep_on_no_match.isCheckable()
+
+
 def test_settings_menu_has_menu_bar_toggle(window):
     """「設定」の末尾に、メニューバーの表示/非表示トグルがあること。"""
     menu = find_menu(window, "設定")
@@ -512,6 +519,7 @@ CHECKABLE_WIRING = [
     ("action_toggle_menu_bar", "set_menu_bar_visible"),
     ("action_show_line_breaks", "set_show_line_breaks"),
     ("action_check_updates_on_startup", "set_check_updates_on_startup"),
+    ("action_beep_on_no_match", "set_beep_on_no_match"),
 ]
 
 

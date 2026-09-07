@@ -109,9 +109,11 @@ class ViewSettingsMixin:
         self._sync_tab_width_action_checked()
         self._sync_open_target_action_checked()
         self._apply_menu_bar_visibility()
-        # 「起動時に更新を確認する」だけは update_check.py の持ち物だが、
-        # チェック付き項目の初期化はここに集めてある。
+        # 「起動時に更新を確認する」は update_check.py、「ヒットなしのときに
+        # 音を鳴らす」は search_replace.py の持ち物だが、チェック付き項目の
+        # 初期化はここに集めてある。
         self._sync_check_updates_action_checked()
+        self._sync_beep_on_no_match_action_checked()
 
     # ------------------------------------------------------------------
     # 折り返しモード（実機フィードバックにより追加）

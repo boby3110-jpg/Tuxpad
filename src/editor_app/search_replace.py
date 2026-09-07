@@ -36,11 +36,16 @@ import time
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QTextCursor
+from PySide6.QtWidgets import QApplication
 
 from .dialogs import ProgressReporter, prompt_int
 from .editor import center_cursor_vertically, document_text
 from .search_panel import NEWLINE_GLYPH, SearchMatch, SearchPanel
-from .settings import save_search_input_lines
+from .settings import (
+    load_beep_on_no_match,
+    save_beep_on_no_match,
+    save_search_input_lines,
+)
 from .textsearch import LineNumbers, find_matches, fold_case, line_snippet
 
 #: 本文が編集されてから検索し直すまでの待ち時間 (ms)。連続入力の途中で
@@ -69,6 +74,25 @@ REPLACE_BATCH_SIZE = 200
 REPLACE_PROGRESS_MIN_MATCHES = 1000
 
 
+def beep() -> None:
+    """OS の警告音を 1 回鳴らす（引き継ぎ ⑪ の「ヒットなしの音」の出口）。
+
+    ``QApplication.beep()`` はプラットフォームの標準的な警告音を鳴らすだけ
+    なので、**追加の依存も音声ファイルも要らない**（「シンプルなエディタ」
+    という方針に合わせて、わざわざ再生用のライブラリは入れない）。
+
+    **テストはこの関数を差し替えて「鳴らそうとしたか」だけを見る**
+    （開発環境には音のデバイスが無く、実際に鳴ったかは確かめられない）。
+    処理をこの関数から動かすときは、差し替え先も直すこと。
+
+    ``QApplication`` がまだ無い場面（起動前・後片付けの後）で呼ばれても
+    落ちないように、インスタンスの有無を確かめてから鳴らす。
+    """
+    if QApplication.instance() is None:
+        return
+    QApplication.beep()
+
+
 def _selection_matches(cursor: QTextCursor, expected: str) -> bool:
     """カーソルが選択している文字列が、検索語 ``expected`` と同じかを返す。
 
@@ -95,7 +119,10 @@ class SearchReplaceMixin:
         self.search_panel.setWindowFlag(Qt.WindowType.Tool, True)
         self.search_panel.setWindowTitle("検索")
         self.search_panel.hide()
-        self.search_panel.search_requested.connect(self._run_search)
+        # 「利用者が明示的に検索した」ときだけ、ヒット 0 件を音で知らせたい
+        # （本文の編集に追随した検索し直しでは鳴らさない）ので、
+        # search_requested は _run_search に直結せず、印を立てる側を通す。
+        self.search_panel.search_requested.connect(self._on_search_requested)
         self.search_panel.match_activated.connect(self._on_search_match_activated)
         self.search_panel.replace_one_requested.connect(self._replace_current_match)
         self.search_panel.replace_all_requested.connect(self._replace_all_matches)
@@ -185,16 +212,30 @@ class SearchReplaceMixin:
             window.search_panel.set_input_visible_lines(lines)
         save_search_input_lines(lines)
 
-    def _run_search(self, query: str) -> None:
+    def _on_search_requested(self, query: str) -> None:
+        """Enter /「検索」ボタンで検索する（＝利用者が明示的に求めた検索）。
+
+        ここを通った検索だけが、ヒット 0 件のときに音を鳴らす
+        （:meth:`_notify_no_match`）。パネルを開いたときの 1 回や、本文の
+        編集に追随した検索し直しは :meth:`_run_search` を直接呼ぶので鳴らない。
+        """
+        self._run_search(query, notify_no_match=True)
+
+    def _run_search(self, query: str, *, notify_no_match: bool = False) -> None:
         """``query`` で全タブを検索し、件数表示とハイライトを更新する。
 
         検索欄への入力では呼ばれない（インクリメンタルサーチはやめた）。
         呼ばれるのは「利用者が明示的に検索したとき」（Enter /「検索」
         ボタン / パネルを開いたとき / 置換の直前）と、「既に検索した語で
         検索し直すとき」（本文の編集・タブの並べ替えへの追随）だけ。
+
+        ``notify_no_match`` を立てると、1 件も見つからなかったときに音で
+        知らせる（引き継ぎ ⑪）。**既定は False**——本文の編集に追随した
+        検索し直しでも鳴らすと、打っている最中にずっと鳴り続けてしまう。
         """
         started = time.perf_counter()
-        self.search_panel.set_matches(self.search_all_tabs(query), query=query)
+        matches = self.search_all_tabs(query)
+        self.search_panel.set_matches(matches, query=query)
         self._update_match_highlights()
         elapsed_ms = (time.perf_counter() - started) * 1000
 
@@ -205,6 +246,45 @@ class SearchReplaceMixin:
         # :meth:`_apply_replacement` の確認が防ぐ。検索語を打ち直せば
         # （そのときの所要時間で測り直して）また追随するようになる。
         self._auto_refresh_on_edit = elapsed_ms <= SLOW_SEARCH_REFRESH_MS
+
+        if notify_no_match and not matches:
+            self._notify_no_match(query)
+
+    # ------------------------------------------------------------------
+    # ヒットが 1 件も無かったことを音で知らせる（引き継ぎ ⑪）
+    # ------------------------------------------------------------------
+    def _notify_no_match(self, query: str) -> None:
+        """検索・置換で 1 件も見つからなかったことを音で知らせる。
+
+        件数欄の「見つかりません」だけでは気づきにくい、という要望への
+        対応（引き継ぎ ⑪）。**鳴らさない場合が 2 つある**:
+
+        - 検索語が空のとき。「まだ何も入れていない」だけなので、
+          ヒットが無いのは当たり前で、知らせても意味が無い。
+        - 設定 (:func:`load_beep_on_no_match`) が OFF のとき。
+
+        鳴らすところは :func:`beep` に切り出してある（テストはそこを
+        差し替えて「鳴らそうとしたか」を見る）。
+        """
+        if not query:
+            return
+        if not load_beep_on_no_match():
+            return
+        beep()
+
+    def set_beep_on_no_match(self, enabled: bool) -> None:
+        """「ヒットなしのときに音を鳴らす」を切り替える（アプリ全体で共有）。
+
+        テーマ等と同じ扱い（開いている全ウィンドウのメニューの印を揃え、
+        QSettings で次回起動時にも復元する）。
+        """
+        save_beep_on_no_match(enabled)
+        for window in self.open_windows():
+            window._sync_beep_on_no_match_action_checked()
+
+    def _sync_beep_on_no_match_action_checked(self) -> None:
+        """チェック付きメニュー項目を、いまの設定に合わせる。"""
+        self.action_beep_on_no_match.setChecked(load_beep_on_no_match())
 
     def _on_editor_text_changed(self) -> None:
         """どれかのタブの本文が変わった。検索結果を作り直す（少し待ってから）。"""
@@ -357,6 +437,10 @@ class SearchReplaceMixin:
         self._ensure_search_current()
         match = self.search_panel.current_match()
         if match is None:
+            # 置換しようにも 1 件も見つかっていない。検索と同じく音で知らせる
+            # （引き継ぎ ⑪）。押した側は「置換」なので、黙って何も起きないと
+            # 置換したのかどうかも分からない。
+            self._notify_no_match(self.search_panel.query())
             return
         query = self.search_panel.query()
         self._suspend_search_refresh = True
@@ -409,6 +493,8 @@ class SearchReplaceMixin:
         query = self.search_panel.query()
         matches = self.search_all_tabs(query)
         if not matches:
+            # 置換対象が 1 件も無い。検索と同じく音で知らせる（引き継ぎ ⑪）。
+            self._notify_no_match(query)
             return
 
         replacement = self.search_panel.replace_text()
