@@ -8,7 +8,6 @@ QSettings には保存しない（新しいウィンドウは自動幅から始�
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from editor_app.tab_bar import MAX_TAB_WIDTH, MIN_TAB_WIDTH, MultiRowTabBar
@@ -98,7 +97,12 @@ def test_none_restores_auto_width(bar):
 
 
 def test_long_name_is_elided_in_fixed_width(bar):
-    """固定幅に収まらない長い名前は … で省略表示される。"""
+    """固定幅に収まらない長い名前は … で省略表示される。
+
+    省き方（末尾を省いて冒頭を残す）そのものは
+    ``tests/test_tab_text_elide.py`` が見張っている。ここは
+    「固定幅にすると省略が起きる」ところだけを見る。
+    """
     long_name = "とても長いファイル名のテキストファイル.txt"
     bar.addTab(long_name)
     bar.set_fixed_tab_width(80)
@@ -107,9 +111,9 @@ def test_long_name_is_elided_in_fixed_width(bar):
     text_rect = bar._text_rect(0)
     assert metrics.horizontalAdvance(long_name) > text_rect.width()
 
-    elided = metrics.elidedText(long_name, Qt.TextElideMode.ElideMiddle, text_rect.width())
-    assert elided != long_name
-    assert "…" in elided
+    shown = bar.tab_display_text(0)
+    assert shown != long_name
+    assert "…" in shown
 
 
 def test_fixed_width_applies_to_tabs_added_later(bar):

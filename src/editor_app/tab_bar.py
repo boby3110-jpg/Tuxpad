@@ -371,6 +371,31 @@ class MultiRowTabBar(QWidget):
             right_margin += CLOSE_SIZE + CLOSE_SPACING
         return rect.adjusted(H_PADDING, 0, -right_margin, 0)
 
+    def tab_display_text(self, index: int) -> str:
+        """タブに実際に描かれる文字列（入り切らない分は**末尾**を … で省く）。
+
+        以前は真ん中を省く ``ElideMiddle`` だったが、実際に扱うファイルの名前は
+        ``有料7日目【返信】（最低1文言Ver）.txt`` のように**冒頭から順に
+        情報が並ぶ**ため、真ん中を抜かれると肝心の見分けが付かなくなる
+        （実機フィードバック）。冒頭を残して末尾を省く方が、同じ幅でも
+        区別できる情報が多い。省かれた分（拡張子など）はツールチップに
+        フルパスが出るので失われない。
+
+        描画とテストの両方から使えるよう、``paintEvent`` の中ではなく
+        ここに置いてある（画面に描かずに「何が見えるか」を確かめられる）。
+        """
+        if not self._is_valid(index):
+            return ""
+        width = self._text_rect(index).width()
+        if width <= 0:
+            # 閉じるボタンぶんを引くと幅が負になることがある。今の Qt は
+            # 負の幅でも空文字を返すが、文書化された振る舞いではないので
+            # ここで打ち切っておく。
+            return ""
+        return self.fontMetrics().elidedText(
+            self._tabs[index].text, Qt.TextElideMode.ElideRight, width
+        )
+
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -443,10 +468,9 @@ class MultiRowTabBar(QWidget):
         text_rect = self._text_rect(index)
         if text_rect.width() > 0:
             painter.setPen(QPen(self.tab_text_color(selected)))
-            text = self.fontMetrics().elidedText(
-                tab.text, Qt.TextElideMode.ElideMiddle, text_rect.width()
+            painter.drawText(
+                text_rect, Qt.AlignmentFlag.AlignCenter, self.tab_display_text(index)
             )
-            painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
 
         close_rect = self.closeButtonRect(index)
         if not close_rect.isEmpty():
