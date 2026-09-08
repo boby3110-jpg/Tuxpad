@@ -18,7 +18,7 @@ from __future__ import annotations
 import difflib
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont, QFontDatabase
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -55,6 +55,69 @@ NO_DIFFERENCE_TEXT = (
     "（中身は同じですが、ファイルの更新日時か大きさが変わっています）"
 )
 
+#: 確認ダイアログのボタンと、``Alt`` 無しで押せるキーの対応（引き継ぎ ⑫）。
+#:
+#: Qt のニーモニックは ``Alt`` を押しながらでないと効かない。Windows の
+#: 多くのアプリは単独キーで反応するので、実機フィードバックで
+#: 「Alt 無しでも効くようにしてほしい」と要望があった。
+#:
+#: **ボタンテキストの ``&`` から拾うのではなく、対応表を決め打ちにしている。**
+#: ``&`` が付くかどうかは Qt の翻訳ファイルが入っているかに左右され
+#: （手元の検証コンテナには日本語訳が無く、``Save``/``Discard``/``Cancel``
+#: には ``&`` が付かない）、拾えなかったときに黙って効かなくなるため。
+#:
+#: ``Discard`` と ``No`` はどちらも ``N`` だが、``Save``/``Discard``/``Cancel``
+#: の組と ``Yes``/``No`` の組が同じダイアログに同時に出ることは無い。
+#: それでも念のため :func:`install_single_key_shortcuts` で重複を弾いている。
+SINGLE_KEY_SHORTCUTS: dict[QMessageBox.StandardButton, Qt.Key] = {
+    QMessageBox.StandardButton.Save: Qt.Key.Key_S,
+    QMessageBox.StandardButton.Discard: Qt.Key.Key_N,
+    QMessageBox.StandardButton.Cancel: Qt.Key.Key_C,
+    QMessageBox.StandardButton.Yes: Qt.Key.Key_Y,
+    QMessageBox.StandardButton.No: Qt.Key.Key_N,
+}
+
+#: 「破棄」ボタンの表示テキスト。Qt の日本語訳は ``破棄(&D)`` なので、
+#: Windows の「保存(S) / 保存しない(N) / キャンセル(C)」の並びに寄せるため
+#: ここだけ差し替える（利用者の指定）。``StandardButton.Discard`` という
+#: enum 自体は変わらないので、呼び出し側の分岐には影響しない。
+DISCARD_BUTTON_TEXT = "破棄(&N)"
+
+
+def install_single_key_shortcuts(box: QMessageBox) -> dict[Qt.Key, QMessageBox.StandardButton]:
+    """``box`` の各ボタンを ``Alt`` 無しの単独キーでも押せるようにする（引き継ぎ ⑫）。
+
+    :data:`SINGLE_KEY_SHORTCUTS` にあるボタンだけが対象。``Alt`` +
+    ニーモニックという従来の入り口はそのまま残る（単独キーが**足される**）。
+
+    ショートカットの効く範囲はダイアログの中だけに閉じてある
+    （``WidgetWithChildrenShortcut``）。アプリ全体に効かせると、背後の
+    ウィンドウの ``S`` や ``C`` と取り合いになる。
+
+    今のところ確認ダイアログに文字入力欄は無いので、単独キーが入力を
+    邪魔することはない。**将来ダイアログに入力欄を足すときは、ここと
+    衝突しないか必ず確かめること。**
+
+    戻り値は実際に割り当てた「キー → ボタン」。テストから
+    「何が割り当てられたか」を見られるようにするためで、呼び出し側は
+    使わなくてよい。
+    """
+    assigned: dict[Qt.Key, QMessageBox.StandardButton] = {}
+    for standard, key in SINGLE_KEY_SHORTCUTS.items():
+        button = box.button(standard)
+        if button is None or key in assigned:
+            # 出ていないボタン、および同じキーが既に埋まっている場合は飛ばす
+            # （同じダイアログに 2 つ割り当てると Qt が「あいまい」として
+            # どちらも動かさない）。
+            continue
+        if standard == QMessageBox.StandardButton.Discard:
+            button.setText(DISCARD_BUTTON_TEXT)
+        shortcut = QShortcut(QKeySequence(key), box)
+        shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        shortcut.activated.connect(button.click)
+        assigned[key] = standard
+    return assigned
+
 
 def show_message_box(
     parent,
@@ -80,6 +143,7 @@ def show_message_box(
     box.setOption(QMessageBox.Option.DontUseNativeDialog, True)
     if default_button != QMessageBox.StandardButton.NoButton:
         box.setDefaultButton(default_button)
+    install_single_key_shortcuts(box)
     return QMessageBox.StandardButton(box.exec())
 
 
@@ -110,6 +174,7 @@ def show_message_box_with_checkbox(
         checkbox = QCheckBox(checkbox_text, box)
         box.setCheckBox(checkbox)
 
+    install_single_key_shortcuts(box)
     answer = QMessageBox.StandardButton(box.exec())
     return answer, bool(checkbox is not None and checkbox.isChecked())
 
