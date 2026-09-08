@@ -2,6 +2,11 @@
 
 [![tests](https://github.com/boby3110-jpg/Tuxpad/actions/workflows/tests.yml/badge.svg)](https://github.com/boby3110-jpg/Tuxpad/actions/workflows/tests.yml)
 
+> **開発初期段階の個人開発プロジェクトです。** 自分の環境（openSUSE系）では
+> 日常的に使えていますが、他のディストロ・デスクトップ環境ではまだ十分に
+> 検証できていません。不具合報告・要望は
+> [Issues](https://github.com/boby3110-jpg/Tuxpad/issues) で歓迎します。
+
 Wine + EmEditor に頼らず、Linux ネイティブで動くシンプルなタブ型テキストエディタ。
 日本語のテキストファイルを扱うことを前提にしています。
 
