@@ -47,6 +47,7 @@ from editor_app.tab_bar import (
     MAX_TAB_WIDTH,
     MIN_TAB_WIDTH,
     TAB_SPACING,
+    TEXT_SLACK,
     MultiRowTabBar,
 )
 
@@ -72,9 +73,14 @@ def names_that_fit(bar: MultiRowTabBar) -> list[str]:
     """上限（``MAX_TAB_WIDTH``）に当たらない長さの名前を集める。
 
     1 文字の幅はフォント次第なので、長さを決め打ちにせず**実際に測って**選ぶ。
+    ``_tab_width()`` は ``horizontalAdvance() + TEXT_SLACK + 2*H_PADDING
+    (+ CLOSE_SIZE + CLOSE_SPACING)`` で幅を決めるので、``room`` にも
+    ``TEXT_SLACK`` を含めないと、この余白ぶんだけ「収まる」と誤判定した
+    名前が実際には上限ちょうどに達してしまう（2026-09-08、公開リポ CI で
+    日本語名が引っかかって判明。フォント依存ではなく計算式の考慮漏れだった）。
     """
     metrics = bar.fontMetrics()
-    room = MAX_TAB_WIDTH - 2 * H_PADDING - CLOSE_SIZE - CLOSE_SPACING
+    room = MAX_TAB_WIDTH - TEXT_SLACK - 2 * H_PADDING - CLOSE_SIZE - CLOSE_SPACING
     candidates = [REAL_NAME[:n] for n in range(1, len(REAL_NAME) + 1)]
     candidates += ["あ" * n + ".txt" for n in range(1, 12)]
     candidates += ["a" * n + ".md" for n in range(1, 24)]
