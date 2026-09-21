@@ -61,6 +61,17 @@ def _create_file_actions(window: "MainWindow") -> None:
     window.action_save_as.setStatusTip("現在のタブを別名で保存します")
     window.action_save_as.triggered.connect(window.save_file_as)
 
+    # このウィンドウの変更済みタブをまとめて保存する（引き継ぎ ⑬）。
+    # ショートカットは割り当てない（利用者の明確な指定。押し間違いで全タブが
+    # 書き込まれると取り返しがつかないため、メニューからのみ）。
+    # ニーモニックは「aLl」の L。ファイルメニューで既に使っている
+    # N・O・S・A・E・R・B・W・X とは重ならない。
+    window.action_save_all = QAction("すべて保存(&L)", window)
+    window.action_save_all.setStatusTip(
+        "このウィンドウの変更されたタブをまとめて保存します"
+    )
+    window.action_save_all.triggered.connect(window.save_all_editors)
+
     # 文字コードを選び直して保存する（実機フィードバックにより追加）。
     # Shift-JIS のファイルに絵文字などを貼ると保存できなくなるため、
     # UTF-8 へ移す逃げ道がここになる。ショートカットは割り当てない
@@ -332,6 +343,7 @@ def create_menus(window: "MainWindow") -> None:
     file_menu.addSeparator()
     file_menu.addAction(window.action_save)
     file_menu.addAction(window.action_save_as)
+    file_menu.addAction(window.action_save_all)
     file_menu.addAction(window.action_save_with_encoding)
     file_menu.addAction(window.action_reopen_with_encoding)
     file_menu.addSeparator()

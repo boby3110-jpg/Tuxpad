@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -117,6 +118,26 @@ def test_backup_keeps_the_raw_bytes(tmp_path: Path) -> None:
     assert copy.read_bytes() == data
 
 
+def test_backup_keeps_the_original_timestamp(tmp_path: Path) -> None:
+    """複製は**元のファイルの更新日時まで**そのまま写す（:func:`shutil.copy2`）。
+
+    アプリの中では控えの日時を索引 (JSON) から引くので、ここが「控えた
+    時刻」に変わってもアプリは動く。効いてくるのは**ファイルマネージャ等で
+    控えを直接見たとき**——どれも同じ時刻に並んでいると、いつの内容なのかが
+    そこからは分からなくなる。
+    """
+    path = tmp_path / "sample.txt"
+    path.write_bytes(JAPANESE.encode("cp932"))
+    original = datetime(2020, 1, 2, 3, 4, 5).timestamp()
+    os.utime(path, (original, original))
+
+    copy = backups.backup_file(path)
+
+    # 1 秒の幅を持たせてあるのは、ファイルシステムの時刻の粒度のため
+    # （「控えた時刻」になってしまう壊れ方とは何年もずれるので取り違えない）。
+    assert copy.stat().st_mtime == pytest.approx(original, abs=1)
+
+
 def test_backup_records_the_original_path_and_time(tmp_path: Path) -> None:
     """索引から「元の絶対パス」と「日時」を後で引ける。"""
     path = tmp_path / "sample.txt"
@@ -162,6 +183,38 @@ def test_backups_of_other_files_are_not_listed(tmp_path: Path) -> None:
 
     (entry,) = backups.list_backups(one)
     assert entry.data_path.read_bytes() == "一\n".encode()
+
+
+def test_backups_in_the_same_place_are_matched_by_the_recorded_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """**置き場が同じでも、索引の元パスが違う控えは見せない。**
+
+    控えは「元のパスのハッシュ」で置き場を分けているだけなので、万一
+    ぶつかれば別のファイルの控えが同じディレクトリに並ぶ。一覧に混ざると、
+    利用者は**別のファイルの中身で自分のファイルを上書き**しかねない
+    （復元は確認ダイアログを挟むが、出ているのは日時と大きさだけで、
+    どのファイルの控えかは見分けられない）。
+
+    ``test_backups_of_other_files_are_not_listed`` は別のファイルなら
+    ハッシュも別になるため、**突き合わせを外しても緑のまま**だった。
+    ここでは置き場を 1 つに固定して、突き合わせそのものを確かめる。
+    """
+    shared = backups.backup_root() / "0123456789abcdef"
+    monkeypatch.setattr(backups, "_bucket", lambda _path: shared)
+    mine = tmp_path / "mine.txt"
+    other = tmp_path / "other.txt"
+    mine.write_text("私の\n", encoding="utf-8")
+    other.write_text("別のファイル\n", encoding="utf-8")
+    backups.backup_file(mine)
+    backups.backup_file(other)
+
+    entries = backups.list_backups(mine)
+
+    # 置き場には 2 件あるが、一覧に出るのは自分のものだけ。
+    assert len(list(shared.glob(f"*{backups.BACKUP_SUFFIX}"))) == 2
+    assert [entry.source_path for entry in entries] == [mine.resolve()]
+    assert [entry.data_path.read_bytes() for entry in entries] == ["私の\n".encode()]
 
 
 def test_unreadable_index_drops_only_that_entry(tmp_path: Path) -> None:
@@ -227,6 +280,30 @@ def test_prune_keeps_the_backup_just_taken(tmp_path: Path) -> None:
     assert copy.exists()
     assert backups.prune(protected=copy, max_total_bytes=10) == []
     assert copy.exists()
+
+
+def test_prune_keeps_the_backup_just_taken_even_when_nothing_is_kept(
+    tmp_path: Path,
+) -> None:
+    """保持期間の側の掃除でも、**控えた瞬間のものは持っていかない**。
+
+    ``RETENTION_DAYS`` は「将来 UI から変えられるように」定数 1 か所で
+    変えられる作りにしてある。そこへ 0 日（＝控えを溜めない）を入れると、
+    :func:`backup_file` が最後に行う掃除から見て、**今控えたばかりのものが
+    既に期限切れ**になる。控えた瞬間に安全網が外れては意味が無いので、
+    ``protected`` は期限の側でも守られること。
+
+    容量の側（``test_prune_keeps_the_backup_just_taken``）は縛られていたが、
+    期限の側は ``protected`` を見なくしても緑のままだった。
+    """
+    path = tmp_path / "sample.txt"
+    path.write_text("いま控えた\n", encoding="utf-8")
+
+    copy = backups.backup_file(path)
+
+    assert backups.prune(protected=copy, retention_days=0) == []
+    assert copy.exists()
+    assert [entry.data_path for entry in backups.list_backups(path)] == [copy]
 
 
 def test_prune_after_backup_uses_the_configured_limits(tmp_path: Path, monkeypatch) -> None:

@@ -142,6 +142,11 @@ SAVE_PROCEED = "proceed"
 SAVE_RESOLVED = "resolved"
 SAVE_CANCELLED = "cancelled"
 
+#: 「すべて保存」(:meth:`FileCommandsMixin.save_all_editors`) の結果を
+#: ステータスバーに出しておく時間（ミリ秒）。押した直後に目を落とせば
+#: 読めて、そのまま編集を続ければ黙って消える長さ。
+SAVE_ALL_STATUS_TIMEOUT_MS = 5000
+
 
 def raise_window(window: QWidget) -> None:
     """ウィンドウを最前面に出す（最小化されていれば元に戻してから）。
@@ -395,6 +400,73 @@ class FileCommandsMixin:
         """現在のタブを、文字コードを選び直して保存する。"""
         editor = self.current_editor()
         return False if editor is None else self.save_editor_with_encoding(editor)
+
+    def save_all_editors(self) -> int:
+        """**このウィンドウの**変更済みタブをまとめて保存する（引き継ぎ ⑬）。
+
+        保存できたタブの数を返す。複数のタブを編集したまま溜めてしまった
+        ときに、1 枚ずつ選んで ``Ctrl+S`` を押さずに済ませるためのもの。
+        **ショートカットは割り当てない**（利用者の明確な指定。押し間違いで
+        全タブが書き込まれると取り返しがつかないため、メニューからのみ）。
+
+        触るのは**このウィンドウのタブだけ**で、別ウィンドウのタブには
+        手を出さない（利用者の指定）。変更の無いタブは初めから対象にしない
+        ので、引き継ぎ ⑧（無編集なら書き込まない）の no-op にすら入らない。
+
+        **途中で 1 枚保存できなくても、そこで打ち切らずに残りへ進む**。
+        無題タブが混じっていれば保存先を尋ねるダイアログが順に出るが、
+        そのうち 1 つをキャンセルしただけで**他のタブまで保存されない**のは
+        利用者の意図から遠い（「このタブは今は名前を決めたくない」という
+        意思表示であって、「すべて保存をやめたい」ではない）。同じ理由で、
+        書き込みに失敗したタブがあっても残りは保存する。
+
+        保存のたびに**そのタブへ切り替えてから**呼ぶ。保存先を尋ねる
+        ダイアログ・外部変更の確認・文字化けの警告・保存できない文字の
+        一覧は、どれも「どのタブの話か」が見えていないと答えようがない
+        （特に :meth:`_report_unencodable_characters` は本文の該当箇所を
+        選択して見せるので、そのタブが裏に居ては意味を成さない）。
+        **最後は元居たタブへ戻す**が、保存できなかったタブがあれば
+        代わりにその最初の 1 枚を出す（何を直せばよいかが目の前に残る）。
+
+        数えているのは :meth:`save_editor` が True を返した回数である。
+        保存直前の外部変更チェックで「ディスクの内容を読み込む」を選んだ
+        タブは、書き込んでいないがここでは成功側に入る（そのタブに未保存の
+        変更はもう無い＝用は済んでいる、という :meth:`_write_editor` の
+        戻り値の意味に従う）。
+        """
+        targets = [editor for editor in self.editors() if editor.is_modified]
+        previous = self.current_editor()
+        saved = 0
+        first_failure: EditorWidget | None = None
+
+        for editor in targets:
+            self.tabs.setCurrentWidget(editor)
+            if self.save_editor(editor):
+                saved += 1
+            elif first_failure is None:
+                first_failure = editor
+
+        back_to = previous if first_failure is None else first_failure
+        if back_to is not None and self.tabs.indexOf(back_to) >= 0:
+            self.tabs.setCurrentWidget(back_to)
+
+        self._report_save_all_result(saved, len(targets) - saved)
+        return saved
+
+    def _report_save_all_result(self, saved: int, failed: int) -> None:
+        """「すべて保存」の結果を、ステータスバーに一言だけ出す。
+
+        失敗したタブについては、その場で理由のダイアログが出ている
+        （保存先のキャンセルだけは利用者自身の操作なので何も出ない）。
+        ここで出すのは「何枚ぶんの用が済んだのか」だけでよい。
+        """
+        if saved == 0 and failed == 0:
+            message = "保存が必要なタブはありません"
+        else:
+            message = f"{saved} 件のタブを保存しました"
+            if failed:
+                message += f"（{failed} 件は保存していません）"
+        self.statusBar().showMessage(message, SAVE_ALL_STATUS_TIMEOUT_MS)
 
     def save_editor(self, editor: EditorWidget) -> bool:
         """指定タブを保存する。まだ保存先が無ければ「名前を付けて保存」に回す。

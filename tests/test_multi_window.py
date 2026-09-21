@@ -571,7 +571,9 @@ MOVE_MENU_TITLE = "別のウィンドウへ移動"
 TEAR_OFF_ITEM_TITLE = "新しいウィンドウへ分離"
 
 
-def build_tab_context_menu(win: MainWindow, index: int, monkeypatch) -> QMenu | None:
+def build_tab_context_menu(
+    win: MainWindow, index: int, monkeypatch, *, via_signal: bool = False
+) -> QMenu | None:
     """タブの右クリックメニューを、実際には開かずに組み立てさせて返す。
 
     ``_on_tab_context_menu`` は最後に ``menu.exec()`` を呼ぶ。ヘッドレスで
@@ -606,7 +608,11 @@ def build_tab_context_menu(win: MainWindow, index: int, monkeypatch) -> QMenu | 
             return None
 
     monkeypatch.setattr(tab_transfer, "QMenu", RecordingMenu)
-    win._on_tab_context_menu(index, QPoint(0, 0))
+    if via_signal:
+        # タブバーの右クリックが受け手までつながっているかも見たい場合。
+        win.tabs.tabContextMenuRequested.emit(index, QPoint(0, 0))
+    else:
+        win._on_tab_context_menu(index, QPoint(0, 0))
     return opened[0] if opened else None
 
 
@@ -846,3 +852,38 @@ def test_tear_off_returns_none_for_an_editor_from_another_window(make_window) ->
 
     assert win_a._tear_off_tab_to_new_window(win_b.current_editor(), QPoint(0, 0)) is None
     assert len(MainWindow.open_windows()) == before
+
+
+# ----------------------------------------------------------------------
+# タブバーからウィンドウへの「配線」そのもの
+#
+# 上のテストは受け手 (``_on_tab_double_clicked`` / ``_on_tab_context_menu``)
+# を**直接呼んで**いる。だから 2026-09-20（62 回目）の変異検査では、
+# ``MainWindow.__init__`` でその受け手をつなぐ行を外しても全部緑のままだった。
+# タブバー側の「シグナルを出す」テスト（`test_tab_bar_interaction.py`）と
+# 受け手側のテストが両方緑でも、**その間がつながっていない**状態があり得る。
+#
+# どちらも Wayland でタブを別ウィンドウへ動かす手段（ドラッグが効かない
+# 環境での唯一確実な道）なので、黙って消えると実機では「右クリックしても
+# 何も出ない」「二度押ししても切り離せない」という形で出る。
+# ----------------------------------------------------------------------
+def test_tab_bar_double_click_signal_tears_the_tab_off(window: MainWindow) -> None:
+    """``tabDoubleClicked`` が切り離しの受け手につながっていること。"""
+    window.new_file()  # 2 タブにして、切り離しても window が残るようにする
+    editor = window.editors()[0]
+
+    window.tabs.tabDoubleClicked.emit(0)
+
+    others = [w for w in MainWindow.open_windows() if w is not window]
+    assert len(others) == 1
+    assert others[0].tabs.indexOf(editor) >= 0
+
+
+def test_tab_bar_context_menu_signal_opens_the_menu(
+    window: MainWindow, monkeypatch
+) -> None:
+    """``tabContextMenuRequested`` がメニューの受け手につながっていること。"""
+    menu = build_tab_context_menu(window, 0, monkeypatch, via_signal=True)
+
+    assert menu is not None
+    assert menu_item(menu, TEAR_OFF_ITEM_TITLE) is not None

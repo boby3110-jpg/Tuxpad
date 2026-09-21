@@ -191,3 +191,79 @@ def test_prompt_without_unsaved_edits_does_not_mention_discarding(
 
     assert len(messages) == 1
     assert "破棄されます" not in messages[0]
+
+
+# ----------------------------------------------------------------------
+# 監視の「配線」そのもの（`_setup_file_watching`）
+#
+# 上のテストはどれも ``_on_watched_file_changed`` / ``_process_pending_reloads``
+# を**直接呼んで**いる。だから 2026-09-20（62 回目）の変異検査では、
+# `_setup_file_watching` の配線を外しても全部緑のままだった——
+# **外部変更の監視が丸ごと黙っていても、誰も気づかない**状態だった。
+#
+# これは利用者の使い方（rclone/NAS で同じファイルを別の PC からも触る）で
+# いちばん困る形で出る: 別の PC で直したファイルを、こちらは古い本文のまま
+# 開いていて、保存した瞬間に相手の変更を静かに上書きする。
+# ここでは中身ではなく**配線が生きていること**だけを、シグナルを自分で
+# 発火させて確かめる（実ファイルシステムの通知を待たないので速い）。
+# ----------------------------------------------------------------------
+
+
+def test_watcher_change_signal_reaches_the_handler(
+    window: MainWindow, sample: Path
+) -> None:
+    """``QFileSystemWatcher.fileChanged`` が受け手につながっていること。
+
+    つながっていないと、外部変更に**一度も気づかない**（ダイアログが
+    出ないので、利用者からは「監視が付いている」ように見えたまま）。
+    """
+    editor = window.open_path(sample)
+    assert editor is not None
+    path = str(editor.path)
+    window._pending_reload_paths.clear()
+    window._reload_check_timer.stop()
+
+    # 実際のファイルシステムの通知は環境によって届き方が違うので、
+    # 監視役が出すシグナルそのものを発火させて配線だけを見る。
+    window._file_watcher.fileChanged.emit(path)
+
+    assert path in window._pending_reload_paths  # 受け手が動いた
+    assert window._reload_check_timer.isActive() is True  # デバウンスも起きた
+
+
+def test_debounce_timeout_runs_the_pending_reloads(
+    window: MainWindow, sample: Path, monkeypatch
+) -> None:
+    """デバウンス用タイマーの ``timeout`` が処理につながっていること。
+
+    つながっていないと、変更を溜めるだけで**一生訊いてこない**
+    （``_pending_reload_paths`` に積まれたまま誰も処理しない）。
+    """
+    editor = window.open_path(sample)
+    assert editor is not None
+    calls = _patch_prompt(monkeypatch, QMessageBox.StandardButton.No)
+
+    sample.write_text("外部で書き換えた内容\n", encoding="utf-8")
+    window._pending_reload_paths.add(str(editor.path))
+    window._reload_check_timer.timeout.emit()
+
+    assert len(calls) == 1
+    assert window._pending_reload_paths == set()
+
+
+def test_debounce_timer_stops_after_firing_once(
+    window: MainWindow, qtbot
+) -> None:
+    """デバウンス用タイマーは 1 回きり (``setSingleShot``) であること。
+
+    繰り返しになると、一度変更を拾ったあと**ウィンドウを閉じるまで
+    ずっと 1.2 秒ごとに起き続ける**（保留が空でも止まらない）。
+    ノート PC では電池を削るだけで、誰の得にもならない。
+    """
+    assert window._reload_check_timer.isSingleShot() is True
+
+    # 実際に 1 回発火させて、止まっていることまで見る（待ち時間は 0 に
+    # してあるので、本来の 1.2 秒を待たずに済む）。
+    window._reload_check_timer.setInterval(0)
+    window._reload_check_timer.start()
+    qtbot.waitUntil(lambda: window._reload_check_timer.isActive() is False, timeout=1000)

@@ -115,6 +115,27 @@ def test_no_tabs_still_has_one_row_height(bar: MultiRowTabBar) -> None:
     assert bar.height() > 0
 
 
+def test_a_brand_new_bar_is_already_one_row_high(qtbot) -> None:
+    """**作った直後**から 1 段ぶんの高さになっていること。
+
+    上のテストは ``bar`` フィクスチャを使っている＝幅を決める時点で
+    再配置が 1 回走るので、「作った直後の高さ」までは見ていない。
+    2026-09-20（63 回目）の変異検査ではそこが穴だった
+    （``tb-no-initial-height`` / ``tb-rows-init-zero``）。
+
+    高さを決めずに置くと、`sizeHint()` が**素のウィジェットの既定の高さ
+    （実測 480px）**を返す。タブバーはレイアウトの中で縦に「言い値」を
+    通すので、最初の 1 回だけ**タブバーが窓の半分を占める**見え方になり
+    かねない（タブが 1 枚入って再配置が走るまで直らない）。
+    """
+    fresh = MultiRowTabBar()
+    qtbot.addWidget(fresh)
+
+    assert fresh.rowCount() == 1
+    assert fresh.height() == fresh.sizeHint().height()
+    assert 0 < fresh.height() < 100  # 1 段ぶん（既定フォントで 24px 前後）
+
+
 def test_tabs_wrap_to_multiple_rows(bar: MultiRowTabBar) -> None:
     """幅に入り切らないタブは次の段へ折り返される。"""
     fill(bar, 20)
@@ -830,6 +851,67 @@ def test_removed_page_survives_the_old_tab_widget(qtbot) -> None:
 
     assert shiboken6.isValid(taken)
     taken.deleteLater()
+
+
+# ----------------------------------------------------------------------
+# タブバーの合図を外へ中継する配線（`MultiRowTabWidget.__init__`）
+#
+# タブバーは「並べ替えたい」「二度押しされた」「右クリックされた」と
+# **言うだけ**で、自分では何もしない（ページも一緒に動かす必要があるので、
+# 実際の処理は `MultiRowTabWidget` 側に集めてある）。その間の 1 行が
+# 外れると、**送り手のテストも受け手のテストも緑のまま、その操作だけが
+# 丸ごと黙る**。2026-09-20（63 回目）の変異検査で実際にそうなっていた
+# （`tw-move-request-not-relayed` / `tw-double-click-not-relayed` /
+# `tw-context-menu-not-relayed`）ので、ここで中継そのものを固定する。
+# ----------------------------------------------------------------------
+def test_bar_move_request_moves_the_page_too(tab_widget: MultiRowTabWidget) -> None:
+    """タブバーの「並べ替えたい」が、ページごとの並べ替えにつながっていること。
+
+    タブバーは自分では並べ替えない（``tabMoveRequested`` を出すだけ）ので、
+    この 1 行が外れると**ドラッグしても何も起きない**——実機では
+    「タブを掴んで動かしたのに元の位置に戻る」という形で出る。
+    """
+    for name in ["1つ目", "2つ目", "3つ目"]:
+        add_page(tab_widget, name)
+
+    tab_widget.tabBar().tabMoveRequested.emit(0, 2)
+
+    assert [tab_widget.tabText(i) for i in range(3)] == ["2つ目", "3つ目", "1つ目"]
+    assert [tab_widget.widget(i).objectName() for i in range(3)] == [
+        "2つ目",
+        "3つ目",
+        "1つ目",
+    ]
+
+
+def test_bar_double_click_is_relayed(tab_widget: MultiRowTabWidget, qtbot) -> None:
+    """タブの二度押しが外（``MainWindow``）まで届くこと。
+
+    二度押しは **Wayland でタブを別ウィンドウへ移す、ドラッグが効かない
+    ときの唯一確実な道**（実機フィードバックで足したもの）。ここが外れると
+    その道が黙って消える。
+    """
+    add_page(tab_widget, "1つ目")
+    add_page(tab_widget, "2つ目")
+    seen: list[int] = []
+    tab_widget.tabDoubleClicked.connect(seen.append)
+
+    tab_widget.tabBar().tabDoubleClicked.emit(1)
+
+    assert seen == [1]
+
+
+def test_bar_context_menu_request_is_relayed(tab_widget: MultiRowTabWidget) -> None:
+    """タブの右クリックが外まで届くこと（タブのメニューが出る）。"""
+    add_page(tab_widget, "1つ目")
+    seen: list[tuple[int, QPoint]] = []
+    tab_widget.tabContextMenuRequested.connect(
+        lambda index, pos: seen.append((index, pos))
+    )
+
+    tab_widget.tabBar().tabContextMenuRequested.emit(0, QPoint(12, 34))
+
+    assert seen == [(0, QPoint(12, 34))]
 
 
 # ----------------------------------------------------------------------

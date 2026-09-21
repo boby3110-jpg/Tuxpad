@@ -134,6 +134,7 @@ def test_file_menu_contents(window):
         window.action_open,
         window.action_save,
         window.action_save_as,
+        window.action_save_all,
         window.action_save_with_encoding,
         window.action_reopen_with_encoding,
         window.action_restore_backup,
@@ -446,6 +447,7 @@ def test_file_actions_are_connected(window, monkeypatch):
 #: テストが上にある）と (2) ``action_quit``（結線先が ``QWidget.close`` で
 #: 差し替えられないため、下で実際に閉じることを見る）。
 REMAINING_WIRING = [
+    ("action_save_all", "save_all_editors"),
     ("action_save_with_encoding", "save_file_with_encoding"),
     ("action_reopen_with_encoding", "reopen_file_with_encoding"),
     ("action_restore_backup", "restore_from_backup"),

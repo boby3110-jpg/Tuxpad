@@ -710,3 +710,25 @@ def test_changing_the_font_relayouts(bar: MultiRowTabBar) -> None:
 
     assert bar.height() > before_height
     assert bar.tabRect(0).height() > before_rect.height()
+
+
+# ----------------------------------------------------------------------
+# 組み立てたときに 1 回だけ決める「印」
+# ----------------------------------------------------------------------
+def test_tab_bar_never_takes_the_keyboard_focus(bar: MultiRowTabBar) -> None:
+    """タブバーはキーボードのフォーカスを受け取らないこと。
+
+    タブを押したときにタブバーがフォーカスを取ってしまうと、**そのまま
+    打った文字がどこにも入らない**（利用者は本文をクリックし直すまで
+    気づけない）。タブは「本文を切り替える道具」であって入力先ではない。
+
+    ここで見ているのは ``setFocusPolicy(NoFocus)`` という**印そのもの**で、
+    押してみた結果ではない。クリックでフォーカスを移すのは Qt の窓側
+    （``QWidgetWindow``）の仕事で、**offscreen で合成したマウスイベントでは
+    そこを通らない**ため、印を外しても「押してみる」テストでは何も起きない
+    （2026-09-20（63 回目）に実測。だから ``tb-focus-policy-strong`` は
+    全テストが緑のまま生き残っていた）。
+    """
+    fill(bar, 3, prefix="フォーカス")
+
+    assert bar.focusPolicy() == Qt.FocusPolicy.NoFocus

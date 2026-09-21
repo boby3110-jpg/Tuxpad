@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
-from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QFont
 from PySide6.QtWidgets import QMessageBox
 
 from editor_app.main_window import MainWindow
@@ -420,3 +420,44 @@ def test_most_recently_active_window_is_none_when_no_window_is_open() -> None:
     assert MainWindow.open_windows() == []
 
     assert MainWindow.most_recently_active_window() is None
+
+
+# ----------------------------------------------------------------------
+# 受け取り口そのもの（ウィジェットが D&D の宛先になっているか）
+#
+# 上のテストはどれもイベントを**自分で組み立てて直接渡して**いる。だから
+# 2026-09-20（62 回目）の変異検査では、``MainWindow.__init__`` の
+# ``setAcceptDrops(True)`` を False にしても全部緑のままだった。
+# Qt はこの印が無いウィジェットにはドラッグのイベントを**そもそも運ばない**
+# ので、実機では「ファイルマネージャからファイルを落としても何も起きない」
+# 「他ウィンドウのタブを落とせない」という形で、D&D が丸ごと黙る。
+# ----------------------------------------------------------------------
+def test_window_is_registered_as_a_drop_target(window: MainWindow) -> None:
+    """ウィンドウ自身が「落とし先」になっていること。"""
+    assert window.acceptDrops() is True
+
+
+def test_editor_drops_rich_text_as_plain_text(window: MainWindow) -> None:
+    """書式付きの内容を落としても、書式は持ち込まないこと。
+
+    ``setAcceptRichText(False)`` が外れると、ブラウザや表計算から貼った
+    （落とした）内容が**その場の書体・文字色ごと**入ってくる。このアプリは
+    プレーンテキストしか扱わないので、保存されるのは結局ただの文字だが、
+    画面上はフォント設定が効いていないように見え、配色によっては
+    **背景と同じ色の文字**になって読めなくなる。
+    """
+    editor = window.current_editor()
+    assert editor.acceptRichText() is False
+
+    editor.setPlainText("")
+    mime = QMimeData()
+    mime.setHtml('<span style="color:#ff0000; font-weight:bold">赤い太字</span>')
+    mime.setText("赤い太字")
+    drop = drop_event(mime)
+
+    editor.dropEvent(drop)
+
+    assert "赤い太字" in editor.toPlainText()
+    cursor = editor.textCursor()
+    cursor.setPosition(1)
+    assert cursor.charFormat().fontWeight() == QFont.Weight.Normal.value
