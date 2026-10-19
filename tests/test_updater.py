@@ -514,3 +514,212 @@ def test_run_git_reports_vanished_working_directory(clone: Path) -> None:
 
     assert result.ok is False
     assert "git を実行できませんでした" in result.stderr
+
+
+# ----------------------------------------------------------------------
+# 71 回目（仕上げの見直し）で足したぶん。
+#
+# `tools/mutation_check.py` の要領で `updater.py` をわざと壊してみたところ、
+# 下の 7 通りは**どれもテストが赤くならなかった**（＝何も縛っていなかった）。
+# いずれも「更新したのに案内が出ない」「見当違いの導入先を更新しようとする」
+# といった、実機でしか気づけない壊れ方につながる。
+# ----------------------------------------------------------------------
+
+
+def test_find_repository_root_accepts_dot_git_as_a_file(tmp_path: Path) -> None:
+    """``.git`` が**ファイル**の導入（worktree / submodule）も git 管理下とみなすこと。
+
+    ``git worktree add`` や submodule で置いた作業ツリーでは、``.git`` は
+    ディレクトリではなく ``gitdir: ...`` と書かれた**ファイル**になる。
+    ここを ``is_dir()`` で見てしまうと、そうした導入が丸ごと「git 管理外」
+    扱いになり、**更新機能が黙って無効になる**（利用者からは「更新を確認
+    しても何も起きない」としか見えない）。
+    """
+    worktree = tmp_path / "worktree"
+    (worktree / "src" / "editor_app").mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: /どこか/.git/worktrees/tuxpad\n", encoding="utf-8")
+
+    assert find_repository_root(worktree / "src" / "editor_app" / "updater.py") == worktree
+
+
+def test_run_git_overrides_a_locale_already_in_the_environment(clone: Path, monkeypatch) -> None:
+    """利用者の環境に ``LC_ALL`` があっても、git には ``C`` を渡すこと。
+
+    出力（``status --porcelain`` の有無、``rev-list --count`` の数字）を
+    解析しているので、日本語ロケールのまま git を動かすと**訳された文言**が
+    返りうる。環境に無いときだけ ``C`` を入れる書き方（``setdefault``）だと、
+    日本語環境の実機でだけ静かに壊れる。
+    """
+    monkeypatch.setenv("LC_ALL", "ja_JP.UTF-8")
+
+    result = run_git(
+        clone, "-c", 'alias.showenv=!echo "locale=$LC_ALL"', "showenv"
+    )
+
+    assert result.ok is True
+    assert "locale=C" in result.text
+
+
+def test_run_git_overrides_a_credential_prompt_already_in_the_environment(
+    clone: Path, monkeypatch
+) -> None:
+    """環境に ``GIT_TERMINAL_PROMPT=1`` があっても、必ず ``0`` に上書きすること。
+
+    ここが環境任せだと、**答える人のいない GUI の裏で git が入力を待ち続ける**
+    （利用者からは「更新の確認が終わらない」に見える）。
+    """
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+
+    result = run_git(
+        clone, "-c", 'alias.showenv=!echo "prompt=$GIT_TERMINAL_PROMPT"', "showenv"
+    )
+
+    assert result.ok is True
+    assert "prompt=0" in result.text
+
+
+def test_run_git_keeps_a_custom_ssh_command(clone: Path, monkeypatch) -> None:
+    """``GIT_SSH_COMMAND`` だけは利用者の指定を尊重すること（``setdefault``）。
+
+    鍵の置き場所などを自分で指定している利用者の設定を奪うと、
+    **更新のためだけに fetch が通らなくなる**。``BatchMode`` を足すのは
+    「何も指定が無いとき」の既定にとどめる、という使い分けをここで固定する。
+    """
+    monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /どこか/id_ed25519")
+
+    result = run_git(
+        clone, "-c", 'alias.showenv=!echo "ssh=$GIT_SSH_COMMAND"', "showenv"
+    )
+
+    assert result.ok is True
+    assert "ssh=ssh -i /どこか/id_ed25519" in result.text
+
+
+def test_run_git_trims_the_complaint_from_git(clone: Path) -> None:
+    """``stderr`` の前後の空白を落としてから返すこと。
+
+    この文字列はそのままダイアログの本文に差し込まれる。落とさないと
+    **末尾に空行の入った間の抜けた知らせ**になる。
+    """
+    result = run_git(clone, "そんなサブコマンドは無い")
+
+    assert result.ok is False
+    assert result.stderr
+    assert result.stderr == result.stderr.strip()
+
+
+def test_apply_update_looks_at_the_whole_update_for_dependency_changes(
+    clone: Path, upstream: Path
+) -> None:
+    """依存の変更は、**取り込んだ全コミット**にまたがって見ること。
+
+    しばらく更新していない利用PC では、一度に何コミットも取り込む。
+    ``requirements.txt`` が変わったのが**最後のコミットとは限らない**ので、
+    直前の 1 コミットだけを見ていると「``./install.sh`` の再実行を」の案内が
+    出ない（依存が足りないまま次回起動して落ちる）。
+    """
+    commit(upstream, "requirements.txt", "PySide6>=6.9\n")
+    commit(upstream, "notes.txt", "そのあとの、ただの変更\n")
+    status = check_for_updates(clone)
+    assert status.count == 2
+
+    result = apply_update(clone, status.target)
+
+    assert result.ok is True
+    assert result.dependencies_changed is True
+    assert "requirements.txt" in result.changed_files
+
+
+def test_apply_update_notices_dependency_changes_mixed_with_ordinary_ones(
+    clone: Path, upstream: Path
+) -> None:
+    """依存ファイル**以外**も一緒に変わっているのが普通の更新であること。
+
+    「変わったファイルが全部依存ファイルのときだけ案内する」では、
+    ほとんどの更新で案内が出ない。
+    """
+    (upstream / "requirements.txt").write_text("PySide6>=6.9\n", encoding="utf-8")
+    (upstream / "notes.txt").write_text("本文の変更\n", encoding="utf-8")
+    git(upstream, "add", "requirements.txt", "notes.txt")
+    git(upstream, "commit", "-m", "依存と本文をまとめて更新")
+    status = check_for_updates(clone)
+
+    result = apply_update(clone, status.target)
+
+    assert result.ok is True
+    assert result.dependencies_changed is True
+
+
+@pytest.mark.parametrize("name", ["requirements.txt", "requirements-dev.txt", "install.sh"])
+def test_apply_update_notices_each_dependency_file(
+    clone: Path, upstream: Path, name: str
+) -> None:
+    """案内の対象にしているファイルを 1 つずつ確かめる。
+
+    一覧 (:data:`updater.DEPENDENCY_FILES`) から 1 行こぼれても、
+    代表 1 件だけを見るテストでは気づけない。
+    """
+    commit(upstream, name, "変わった\n")
+    status = check_for_updates(clone)
+
+    result = apply_update(clone, status.target)
+
+    assert result.ok is True
+    assert result.dependencies_changed is True
+    assert name in result.changed_files
+
+
+def test_git_timeout_is_short_enough_to_answer_a_person_who_pressed_the_button() -> None:
+    """``GIT_TIMEOUT_SECONDS`` が「待てる長さ」に収まっていること.
+
+    **この定数は、黙った相手に対する唯一の歯止めである。** GUI 側
+    (`update_check.py`) は ``check_for_updates(repo_root)`` と呼ぶだけで
+    ``timeout`` を一度も渡していないので、実際に効くのは常にこの既定値。
+
+    長くし過ぎると、「設定 → 更新 → 更新を確認」を押した人が**答えを
+    もらえなくなる**。確認中は ``_update_check_running`` が立っていて、
+    もう一度押しても「更新を確認しています。」と返すだけなので、
+    **そのセッションの間ずっとメニューが死ぬ**（確認スレッドは daemon
+    なのでアプリは終われるが、終わるまで結果は出ない）。
+    短くし過ぎると、遅い回線や NAS 越しの ``git fetch`` が正常なのに
+    毎回「確認できませんでした」になる。
+
+    そこで**値そのものを固定せず**（調整の余地は残す）、
+    「人が待てる範囲か」だけを縛る。2026-10-18（77 回目）に変異
+    ``up-timeout-a-day``（30 秒 → 86400 秒）が全 1981 件すべて緑のまま
+    通り抜けたため追加した。
+    """
+    assert 5 <= updater.GIT_TIMEOUT_SECONDS <= 120
+
+
+def test_the_gui_relies_on_the_default_git_timeout() -> None:
+    """更新確認の入口が ``timeout`` を自分で渡していないこと.
+
+    上のテストが守っているのは**既定値**なので、もし GUI 側が独自の
+    ``timeout`` を渡すようになったら、既定値をいくら縛っても意味が無くなる
+    （上のテストは緑のまま、実際の歯止めだけが外れる）。
+    その取り違えに気づけるよう、既定値に任せていること自体を押さえておく。
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from editor_app import update_check
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(update_check.UpdateCheckMixin)))
+    called: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id not in ("check_for_updates", "apply_update"):
+            continue
+        called.append(node.func.id)
+        passed = {keyword.arg for keyword in node.keywords}
+        assert "timeout" not in passed, (
+            f"{node.func.id} に timeout を渡すようになったら、"
+            "GIT_TIMEOUT_SECONDS を縛っても歯止めにならない"
+        )
+
+    # 呼び出しそのものが消えて（名前が変わって）いたら、上の for 文は
+    # 1 度も回らずに緑になる。それを「確かめた」と取り違えないための念押し。
+    assert sorted(called) == ["apply_update", "check_for_updates"]

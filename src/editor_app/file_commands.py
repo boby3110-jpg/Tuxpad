@@ -304,6 +304,29 @@ class FileCommandsMixin:
         editor = self.current_editor()
         return False if editor is None else self.reopen_editor_with_encoding(editor)
 
+    def reload_file_from_disk(self) -> bool:
+        """現在のタブを、今の文字コードのままディスクから読み直す。"""
+        editor = self.current_editor()
+        return False if editor is None else self.reload_editor_from_disk(editor)
+
+    def reload_editor_from_disk(self, editor: EditorWidget) -> bool:
+        """指定タブをディスクから読み直す（文字コードは訊かない。引き継ぎ ⑭）。
+
+        「文字コードを指定して開き直す」(:meth:`reopen_editor_with_encoding`)
+        から**文字コードを選ばせる部分だけを省いた**もの。外部変更の自動検知
+        (:mod:`editor_app.file_watch`) が入っても「**手で確実に読み直せる道**」は
+        別に欲しい、という利用者の要望で足した。それまでは開き直しで代用して
+        いたが、**そのままでよいのに毎回文字コードを選ばされるのが余計**だった。
+
+        **いまの文字コードをそのまま使う**（判定し直さない）。ディスクの
+        中身が変わっていても、文字コードまで変わっているとは限らない——
+        というより、利用者が開き直しで選んだ結果をここで勝手に捨てると、
+        「読み直したら文字化けした」という形で現れる。拮抗の印
+        (:attr:`~editor_app.editor.EditorWidget.encoding_alternatives`) も
+        そのまま残す（利用者はまだ判定の拮抗を解決していない）。
+        """
+        return self._reopen_editor_from_disk(editor, editor.encoding, chosen=False)
+
     def reopen_editor_with_encoding(self, editor: EditorWidget) -> bool:
         """指定タブを、選んだ文字コードでディスクから読み直す（成功したら True）。
 
@@ -328,14 +351,9 @@ class FileCommandsMixin:
           再読み込みと食い違わないようにするため）。
         """
         if editor.path is None:
-            show_message_box(
-                self,
-                QMessageBox.Icon.Information,
-                "開き直せません",
-                f"「{editor.display_name}」はまだファイルに保存されていないため、"
-                "読み直す元がありません。\n\n"
-                "先に「名前を付けて保存」で保存してください。",
-            )
+            # 選ばせる前に断る（読み直す元が無いのに文字コードを訊くのは
+            # 利用者の手間を増やすだけ）。本文は読み直しと共通。
+            self._warn_nothing_to_reload(editor, chosen=True)
             return False
 
         choices = encoding_choices(editor.encoding)
@@ -350,16 +368,76 @@ class FileCommandsMixin:
         )
         if chosen is None:
             return False
-        encoding = choices[chosen]
+
+        return self._reopen_editor_from_disk(editor, choices[chosen], chosen=True)
+
+    # ------------------------------------------------------------------
+    # 「開き直し」と「再読み込み」の共通部分（引き継ぎ ⑭）
+    # ------------------------------------------------------------------
+    def _warn_nothing_to_reload(self, editor: EditorWidget, *, chosen: bool) -> None:
+        """まだ保存していないタブには読み直す元が無い、と伝えるだけ。"""
+        show_message_box(
+            self,
+            QMessageBox.Icon.Information,
+            "開き直せません" if chosen else "再読み込みできません",
+            f"「{editor.display_name}」はまだファイルに保存されていないため、"
+            "読み直す元がありません。\n\n"
+            "先に「名前を付けて保存」で保存してください。",
+        )
+
+    def _reopen_editor_from_disk(
+        self, editor: EditorWidget, encoding: str, *, chosen: bool
+    ) -> bool:
+        """タブの本文をディスクから読み直す（成功したら True）。
+
+        **「文字コードを指定して開き直す」と「再読み込み」の両方がここを
+        通る**（引き継ぎ ⑭。「新しく書き起こさず、共通部分を切り出して
+        使い回すこと」という指示に従って切り出した）。危ない所——未保存の
+        編集を捨てる確認・読めなかったときの扱い・本文の置き換え——は
+        **1 本の道にまとめてあり、2 つの入口で食い違わない**。
+
+        ``chosen`` は「利用者が文字コードを選んだのか」。これで変わるのは
+        次の 2 つだけで、動きの骨はまったく同じ道を通る。
+
+        - **文面**（「開き直し」か「再読み込み」か、文字コードに触れるか）
+        - **拮抗の印** (:attr:`~editor_app.editor.EditorWidget.encoding_alternatives`)
+          … 選んだのなら判定の拮抗は解決しているので消す。選んでいない
+          （ただの読み直し）なら**そのまま残す**——印はステータスバーの
+          :data:`~editor_app.main_window.AMBIGUOUS_ENCODING_MARK` の元で、
+          読み直しただけで消えると「別の文字コードでも読めるファイル」
+          という警告が黙って失われる。
+
+        どちらの入口でも守ること（元の docstring から引き継ぐ約束）:
+
+        - まだ保存していないタブには読み直す元が無いので、その旨だけ伝える。
+        - **未保存の編集は捨てることになる**ので、必ず確認を挟む。
+        - 読めなければ、**タブには一切触らず**理由を伝える
+          （読めないものを空にしてしまうと、それこそ内容を失う）。
+        - 置き換えは
+          :meth:`~editor_app.file_watch.FileWatchMixin._reload_editor_content`
+          を使い回す（カーソル位置の保持・未保存マーク・見分け札の更新が
+          外部変更の再読み込みと食い違わないようにするため）。
+        """
+        if editor.path is None:
+            self._warn_nothing_to_reload(editor, chosen=chosen)
+            return False
 
         if editor.is_modified:
+            if chosen:
+                detail = (
+                    f"{describe_encoding(encoding)} で開き直すと、"
+                    "その編集は破棄されます。\n\n開き直しますか？"
+                )
+            else:
+                detail = (
+                    "ディスクの内容で読み直すと、その編集は破棄されます。"
+                    "\n\n再読み込みしますか？"
+                )
             answer = show_message_box(
                 self,
                 QMessageBox.Icon.Question,
-                "開き直し",
-                f"「{editor.display_name}」には未保存の変更があります。\n"
-                f"{describe_encoding(encoding)} で開き直すと、その編集は破棄されます。"
-                "\n\n開き直しますか？",
+                "開き直し" if chosen else "再読み込み",
+                f"「{editor.display_name}」には未保存の変更があります。\n{detail}",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -369,18 +447,28 @@ class FileCommandsMixin:
         try:
             text, newline = read_text_file_as(editor.path, encoding)
         except Exception as exc:  # noqa: BLE001 - 失敗理由はそのまま利用者に見せる
+            if chosen:
+                reason = (
+                    f"「{editor.display_name}」を {describe_encoding(encoding)} "
+                    f"として読み直せませんでした。"
+                )
+            else:
+                reason = f"「{editor.display_name}」を読み直せませんでした。"
             show_message_box(
                 self,
                 QMessageBox.Icon.Critical,
-                "開き直せません",
-                f"「{editor.display_name}」を {describe_encoding(encoding)} として"
-                f"読み直せませんでした。\n\n{exc}\n\n"
-                "タブの内容はそのままにしてあります。",
+                "開き直せません" if chosen else "再読み込みできません",
+                f"{reason}\n\n{exc}\n\n" "タブの内容はそのままにしてあります。",
             )
             return False
 
-        # 利用者が自分で選んだ以上、判定の拮抗は解決している（印を消す）。
-        self._reload_editor_content(editor, text, encoding, newline)
+        self._reload_editor_content(
+            editor,
+            text,
+            encoding,
+            newline,
+            alternatives=() if chosen else editor.encoding_alternatives,
+        )
         return True
 
     # ------------------------------------------------------------------

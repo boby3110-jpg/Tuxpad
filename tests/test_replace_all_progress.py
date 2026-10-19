@@ -107,6 +107,39 @@ def test_make_replace_progress_returns_none_below_threshold(
     assert window._make_replace_progress(search_replace.REPLACE_PROGRESS_MIN_MATCHES - 1) is None
 
 
+def test_make_replace_progress_builds_a_real_window_at_the_threshold(
+    window: MainWindow,
+) -> None:
+    """**ちょうどしきい値**では本物の窓を作り、件数と文面を渡すこと。
+
+    ここまで、この分岐（``return ProgressReporter(...)``）は**一度も
+    通っていなかった**。全置換のテストはどれも
+    :meth:`_make_replace_progress` ごと差し替えて偽物を作らせるので、
+    本物の窓へ渡す引数が入れ違っていても誰も気づけない。
+
+    とくに ``total`` を渡し損なうと、``QProgressDialog`` は
+    **最大値 0 ＝「終わりの見えない待ち表示」**になり、
+    「2 万件のうち何件まで進んだか分からない」という引き継ぎ ⑨ の
+    報告そのものへ戻る（しかも**出ること自体は変わらない**ので、
+    偽物を使うテストでは最後まで緑のまま）。
+
+    境目を ``REPLACE_PROGRESS_MIN_MATCHES`` ちょうどで見ているのは、
+    ``<`` を ``<=`` と書き違えると**しきい値ぴったりの時だけ窓が出ない**
+    （＝境目が 1 件ずれる）のを捕まえるため。
+    """
+    total = search_replace.REPLACE_PROGRESS_MIN_MATCHES
+    progress = window._make_replace_progress(total)
+
+    assert progress is not None
+    try:
+        dialog = progress._dialog
+        assert dialog.maximum() == total, "件数を渡していない＝進み具合が出ない"
+        assert str(total) in dialog.labelText(), "何件を置換しているのか文面に出ない"
+        assert dialog.windowTitle() == "全置換"
+    finally:
+        progress.close()
+
+
 # ----------------------------------------------------------------------
 # 大量のときはバッチに割って進める
 # ----------------------------------------------------------------------

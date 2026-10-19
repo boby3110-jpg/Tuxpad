@@ -147,9 +147,21 @@ def palette_for(theme: str) -> QPalette:
 
 #: QSS の対象にしてはいけないウィジェット型（テストからも参照する）。
 #: エディタ本文の配色機能と衝突するため。
+#:
+#: **``EditorWidget`` の継承の連なり（``QTextEdit`` → ``QAbstractScrollArea``
+#: → ``QFrame`` → ``QWidget``）を 1 つも欠かさず挙げること。** QSS の型
+#: セレクタは派生クラスにも効くので、**どれ 1 つでも抜けると本文の配色が
+#: 奪われる**。``QFrame`` は 2026-10-11（73 回目）に足した——それまで
+#: 抜けていた。offscreen で実測し、``QFrame { background-color: … }`` が
+#: ``QWidget`` / ``QAbstractScrollArea`` と**まったく同じように**本文の
+#: 背景を塗り替えることを確認している
+#: （``test_excluded_selectors_cover_the_editor_widget_class_hierarchy``
+#: が継承の連なりから自動で突き合わせるので、基底クラスを変えたときも
+#: 気づける）。
 EXCLUDED_QSS_SELECTORS = (
     "QWidget",
     "QAbstractScrollArea",
+    "QFrame",
     "QPlainTextEdit",
     "QTextEdit",
 )

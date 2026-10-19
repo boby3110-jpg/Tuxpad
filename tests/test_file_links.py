@@ -34,6 +34,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from editor_app import fileio
 
 
@@ -203,3 +205,71 @@ def test_broken_symlink_does_not_crash_the_writer(tmp_path: Path) -> None:
     assert missing_target.read_bytes() == b"new\n"
     # リンクは残る.
     assert link.is_symlink()
+
+
+def test_symlink_loop_does_not_crash_the_writer(tmp_path: Path) -> None:
+    """**輪になった**シンボリックリンクへ書いても、例外で落ちず本文も失わない.
+
+    ``a → b → a`` のように互いを指し合ったリンクでは、
+    ``Path.resolve()`` が**実体を決められない**。そのときの投げ方が
+    **Python の版で違う**のがこの穴の厄介なところ:
+
+    - **3.11 / 3.12** … ``RuntimeError("Symlink loop from ...")`` を投げる
+      （``OSError`` ではない）。
+    - **3.13 以降** … 投げずに、諦めた結果を返す。
+
+    つまり ``except OSError`` だけで書いていると、**3.13 の開発機では
+    緑のまま、3.12 の利用者の手元でだけ落ちる**。しかも落ち方は
+    「保存できません」のダイアログではなく、
+    :meth:`~editor_app.file_commands.FileCommandsMixin._write_editor` の
+    **外**まで飛ぶ素の例外になる（利用者の最優先事項「保存できなくなる」
+    に直結する）。``install.sh`` が支える版には Python 3.12 の環境
+    （Ubuntu 24.04 系）が含まれるので、ここは実際に通る道である。
+
+    ここで縛るのは「落ちないこと」と「書いた本文が失われないこと」だけ。
+    **輪のリンクは実体が存在しないので、リンクとして残す道がそもそも無い**
+    （普通のファイルに置き換わる）。これは行き先の無いリンクへ書いたときと
+    同じ扱いで、黙って失敗するより良い、という判断である。
+    """
+    first = tmp_path / "a.txt"
+    second = tmp_path / "b.txt"
+    first.symlink_to(second)
+    second.symlink_to(first)
+    assert first.is_symlink()
+
+    fileio.write_encoded_file(first, "輪のリンクへ書いた内容\n".encode("utf-8"))
+
+    # 書いた本文がそのまま読み戻せること（＝黙って捨てられていない）。
+    assert first.read_bytes() == "輪のリンクへ書いた内容\n".encode("utf-8")
+    # もう一方のリンクには手を出していない。
+    assert second.is_symlink()
+
+
+def test_a_runtime_error_from_resolve_is_not_leaked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Path.resolve()`` が ``RuntimeError`` を投げても、外へ漏らさないこと.
+
+    上の輪のリンクのテストは、**この環境の Python の版でしか**
+    ``RuntimeError`` の道を通らない（3.13 以降は投げない）。
+    つまりクラウド側が 3.13 になった日に、``except`` から
+    ``RuntimeError`` を落としても**誰も赤くならない**——
+    版の違いで消える見張りになってしまう。
+
+    そこで、投げ方そのものを偽装して ``RuntimeError`` の道を**どの版でも**
+    通す。:func:`~editor_app.fileio.resolve_path` 側の同じ約束は
+    ``test_open_file.py`` が別に縛っている。
+    """
+    real = tmp_path / "real.txt"
+    real.write_bytes(b"old\n")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+
+    def raising_resolve(self, *args, **kwargs):
+        raise RuntimeError(f"Symlink loop from '{self}'")
+
+    monkeypatch.setattr(Path, "resolve", raising_resolve)
+
+    fileio.write_encoded_file(link, b"new\n")  # 例外が漏れないことが見張りたいこと
+
+    assert link.read_bytes() == b"new\n"

@@ -25,6 +25,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -34,6 +37,8 @@ from editor_app import APP_NAME, __version__
 from editor_app import app as app_module
 from editor_app.ipc import InstanceServer
 from editor_app.main_window import MainWindow
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class _MainRun:
@@ -148,6 +153,78 @@ def test_create_app_sets_a_window_icon(restore_app_metadata) -> None:
     app = app_module.create_app([])
 
     assert not app.windowIcon().isNull()
+
+
+#: **本物の** ``QApplication`` を作る別プロセス。``create_app`` の
+#: 「まだ無ければ作る」側はこの中でしか通らない（1 プロセスに
+#: QApplication は 1 つしか作れないので、pytest の中では
+#: 既にある方を返す枝しか踏めない）。
+#:
+#: ``main()`` ではなく ``create_app`` だけを呼ぶのが大事なところ。
+#: ``main()`` は IPC のソケットへ繋ぎに行き、``QSettings`` を読み書きし、
+#: 更新確認のスレッドを起こすので、**利用者の実機でテストを走らせたときに
+#: 本人の設定や起動中の Tuxpad へ手を出してしまう**。``create_app`` は
+#: どれにも触らない（組織名を設定するだけ）。
+_CREATE_APP_RUNNER = """
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from editor_app.app import create_app
+
+app = create_app(sys.argv[2:])
+print("NAME", app.applicationName())
+print("VERSION", app.applicationVersion())
+print("ORG", app.organizationName())
+print("DESKTOP", app.desktopFileName())
+print("ICON_NULL", app.windowIcon().isNull())
+print("ARGS", "\\t".join(app.arguments()))
+"""
+
+
+def test_a_fresh_process_really_creates_the_application() -> None:
+    """**別プロセスで本物の ``QApplication`` が作れる**こと。
+
+    ここまで、``create_app`` の「まだ無ければ作る」側は
+    **テストから一度も通っていなかった**。QApplication は 1 プロセスに
+    1 つしか作れないので、pytest の中では常に pytest-qt が先に作った方が
+    返り、上の 3 件が見ているのは**使い回す側**だけである。
+
+    つまり ``QApplication(...)`` の行を壊しても、**1900 件すべてが緑のまま
+    アプリが起動しなくなる**（テストは pytest-qt の QApplication に
+    相乗りしているので、起動そのものを誰も試していない）。利用者から見れば
+    「アイコンを押しても何も出ない」という最も分かりやすい壊れ方なのに、
+    気づけるのが実機だけ、という状態だった。
+
+    あわせて次の 2 つも、**真っ新なプロセスで**初めて確かめられる。
+
+    - **アイコンが読めること** … ``_load_app_icon()`` は
+      ``importlib.resources`` で同梱の画像を探す。pytest の中では
+      作業ディレクトリがリポジトリ直下なので、相対パスで書いてしまって
+      いても気づけない（``tests/test_app_icon.py`` 側は中身を見ている）。
+    - **引数が Qt へ届くこと** … ``QApplication`` は受け取った ``argv`` から
+      ``-style`` や ``-platform`` といった**Qt 自身のオプション**を読む。
+      ここで渡し損なうと、``install.sh`` が作るランチャや利用者の
+      ``.desktop`` でこれらを指定しても黙って無視される。
+    """
+    args = ["tuxpad", "--見張り用の引数"]
+    proc = subprocess.run(
+        [sys.executable, "-c", _CREATE_APP_RUNNER, str(REPO_ROOT / "src"), *args],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, f"別プロセスで QApplication が作れない:\n{proc.stderr}"
+    printed = dict(
+        line.split(" ", 1) for line in proc.stdout.splitlines() if " " in line
+    )
+    assert printed["NAME"] == APP_NAME
+    assert printed["VERSION"] == __version__
+    assert printed["ORG"] == APP_NAME
+    assert printed["DESKTOP"] == "tuxpad"
+    assert printed["ICON_NULL"] == "False", "真っ新なプロセスでアイコンが読めていない"
+    assert printed["ARGS"].split("\t") == args, "Qt へコマンドライン引数が届いていない"
 
 
 # ----------------------------------------------------------------------

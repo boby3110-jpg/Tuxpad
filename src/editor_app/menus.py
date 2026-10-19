@@ -92,6 +92,20 @@ def _create_file_actions(window: "MainWindow") -> None:
     )
     window.action_reopen_with_encoding.triggered.connect(window.reopen_file_with_encoding)
 
+    # ディスクから読み直すだけ（文字コードは訊かない。引き継ぎ ⑭）。
+    # ネットワーク越し (NAS/rclone) のファイルは inotify が届かないため
+    # 自動検知がポーリング頼みになる。**手で確実に読み直せる道**を別に
+    # 用意しておくのがこの項目の存在理由。上の「文字コードを指定して
+    # 開き直す」と対になる操作なので、その隣に置く。
+    # ニーモニックは「reloadU」の U。ファイルメニューで既に使っている
+    # N・O・S・A・L・E・R・B・W・X とは重ならない（R は上が取っている）。
+    # ショートカットは割り当てない（利用者の明確な指定。F5 も割り当てない）。
+    window.action_reload = QAction("再読み込み(&U)", window)
+    window.action_reload.setStatusTip(
+        "現在のタブを、今の文字コードのままファイルから読み直します"
+    )
+    window.action_reload.triggered.connect(window.reload_file_from_disk)
+
     # 上書き前の控えからの復元（引き継ぎ ⑦）。**手作業のコピー&ペーストに
     # させず、アプリの中だけで完結させる**のがこの項目の存在理由なので、
     # 「バックアップフォルダを開く」ではなくここから復元まで行う。
@@ -346,6 +360,7 @@ def create_menus(window: "MainWindow") -> None:
     file_menu.addAction(window.action_save_all)
     file_menu.addAction(window.action_save_with_encoding)
     file_menu.addAction(window.action_reopen_with_encoding)
+    file_menu.addAction(window.action_reload)
     file_menu.addSeparator()
     file_menu.addAction(window.action_restore_backup)
     file_menu.addSeparator()

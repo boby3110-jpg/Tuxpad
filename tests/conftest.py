@@ -3,6 +3,12 @@
 このリポジトリの CI / 開発環境にはディスプレイが無いため、Qt は必ず
 offscreen プラットフォームで動かす。QApplication が生成される前に
 環境変数を設定する必要があるので、import 時点で設定している。
+
+もう 1 つ、**走り出す前の足切り**（:func:`pytest_configure`）がある。
+PySide6 6.12.0 + Python 3.11 の組み合わせは ``None`` の参照数を
+取りこぼすため、途中で「Aborted」だけを残してプロセスごと消える。
+どのテストが悪いのかまったく分からなくなるので、**1 件も走らせる前に
+理由を出して止める**。詳細は ``tests/test_pyside_runtime_sanity.py``。
 """
 
 from __future__ import annotations
@@ -16,6 +22,30 @@ import pytest  # noqa: E402
 import shiboken6  # noqa: E402
 
 from editor_app.main_window import MainWindow  # noqa: E402
+from pyside_runtime import (  # noqa: E402
+    NONE_IS_IMMORTAL,
+    TOLERANCE,
+    broken_pyside_message,
+    none_references_lost,
+    restore_none_references,
+)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """壊れた PySide6 で走り出さないようにする（理由を出して即やめる）。
+
+    ここで ``pytest.exit`` する理由: 参照数を取りこぼす PySide6 では
+    **どのテストでも**インタプリタが落ち得るので、1 件だけ赤にして
+    続けても、その赤が画面に出る前に全体が「Aborted」で消えてしまう
+    （2026-10-11（72 回目）に実際にそうなった）。走らせる意味が無いので、
+    何が起きているかを出して、きれいに終わらせる。
+    """
+    if NONE_IS_IMMORTAL:
+        return
+    lost = none_references_lost()
+    if lost > TOLERANCE:
+        restore_none_references(lost)
+        pytest.exit(broken_pyside_message(lost), returncode=1)
 
 
 def _discard_unsaved_changes(win: MainWindow) -> None:

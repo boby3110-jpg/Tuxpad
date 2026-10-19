@@ -277,3 +277,63 @@ def test_closing_the_panel_cancels_a_queued_refresh(
     assert not window._search_refresh_timer.isActive()  # 取り消された
     qtbot.wait(SEARCH_REFRESH_DELAY_MS + 150)
     assert len(window.search_panel.matches()) == 1  # 閉じた時点のまま
+
+
+# ----------------------------------------------------------------------
+# 11. 検索欄・置換欄の Tab は「次の欄へ移る」（タブ文字を入れない）
+# ----------------------------------------------------------------------
+def _press_tab_at_the_end(field, qtbot) -> None:
+    """欄の末尾にカーソルを置いて Tab を 1 回押す。"""
+    cursor = field.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    field.setTextCursor(cursor)
+    field.setFocus()
+    qtbot.keyClick(field, Qt.Key.Key_Tab)
+
+
+def test_tab_in_the_search_box_does_not_type_a_tab_character(
+    window: MainWindow, qtbot
+) -> None:
+    """検索欄で Tab を押しても、語にタブ文字が混ざらないこと。
+
+    ``setTabChangesFocus(True)`` の 1 行で決まる振る舞いで、**外しても
+    全テストが緑のまま**だった（74 回目に変異で確かめた）。混ざると
+    「打った覚えのない語」で検索することになり、しかも**タブ文字は
+    画面上では空白と見分けが付かない**ので、ヒットしない理由が分からない。
+    """
+    window.show_search_panel()
+    type_query(window, "あ")
+
+    _press_tab_at_the_end(window.search_panel._input, qtbot)
+
+    assert window.search_panel._input.toPlainText() == "あ"
+
+
+def test_tab_in_the_replace_box_does_not_type_a_tab_character(
+    window: MainWindow, qtbot
+) -> None:
+    """置換欄も同じ（こちらが混ざると、本文に余計なタブを書き込む）。"""
+    window.show_search_panel()
+    field = window.search_panel._replace_input
+    field.setPlainText("い")
+
+    _press_tab_at_the_end(field, qtbot)
+
+    assert field.toPlainText() == "い"
+
+
+def test_tab_in_the_body_still_types_a_tab_character(
+    window: MainWindow, qtbot
+) -> None:
+    """対照。**本文側は今までどおりタブ文字が入る**こと。
+
+    検索欄の側だけを変えたつもりが本文まで巻き込んでいないか、
+    同じキーで確かめておく（本文で Tab が効かなくなるのは実害が大きい）。
+    """
+    editor = window.current_editor()
+    edit_text(editor, "")
+    editor.setFocus()
+
+    qtbot.keyClick(editor, Qt.Key.Key_Tab)
+
+    assert editor.toPlainText() == "\t"

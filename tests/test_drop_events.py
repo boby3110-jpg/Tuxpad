@@ -21,6 +21,15 @@
 
 という形にしてある。イベントだけを受け取って mime を捨てる書き方をすると、
 テストがランダムに落ちるようになるので注意。
+
+**座標の型は PySide6 のバージョンで違う**:
+``QDragEnterEvent`` / ``QDragMoveEvent`` の ``QPoint`` を取る版は
+**Qt 6.12（PySide6 6.12.0）で deprecated になった**（``filterwarnings =
+error`` なので、そのままだとこのファイルの 8 件がまとめて赤くなる。
+2026-10-11（72 回目）で実際にそうなった）。一方、``QPointF`` を取る版は
+**6.11.2 には無い**（``TypeError``）。そのため :func:`_drag_event` で
+新しい版を先に試し、無ければ古い版へ落ちる形にしてある。
+（``QDropEvent`` は Qt 6 の最初から ``QPointF`` なので、そのままでよい。）
 """
 
 from __future__ import annotations
@@ -64,16 +73,36 @@ def text_mime(text: str = "ただのテキスト") -> QMimeData:
     return mime
 
 
+def _drag_event(event_type, mime: QMimeData):
+    """``QDragEnterEvent`` / ``QDragMoveEvent`` を、どの PySide6 でも組み立てる。
+
+    * **PySide6 6.12.0 以降**: ``QPoint`` を取る版が deprecated になった。
+      ``pytest.ini`` は ``filterwarnings = error`` なので、``QPoint`` で
+      組み立てると ``DeprecationWarning`` でこのファイルがまとめて赤くなる。
+    * **6.11.2 まで**: ``QPointF`` を取る版が**そもそも無い**ので、
+      ``QPointF`` を渡すと ``TypeError`` になる。
+
+    ``requirements.txt`` は Python のバージョンによって 6.11 系と 6.12 系を
+    使い分ける（6.12.0 の参照数バグ対策。``test_pyside_runtime_sanity.py``
+    参照）ので、**両方で通る形にしておく必要がある**。新しい版を先に試して、
+    無ければ古い版へ落ちる。
+    """
+    try:
+        return event_type(
+            QPointF(10, 10), Qt.DropAction.CopyAction, mime, BUTTONS, NO_MODIFIER
+        )
+    except TypeError:
+        return event_type(
+            QPoint(10, 10), Qt.DropAction.CopyAction, mime, BUTTONS, NO_MODIFIER
+        )
+
+
 def enter_event(mime: QMimeData) -> QDragEnterEvent:
-    return QDragEnterEvent(
-        QPoint(10, 10), Qt.DropAction.CopyAction, mime, BUTTONS, NO_MODIFIER
-    )
+    return _drag_event(QDragEnterEvent, mime)
 
 
 def move_event(mime: QMimeData) -> QDragMoveEvent:
-    return QDragMoveEvent(
-        QPoint(10, 10), Qt.DropAction.CopyAction, mime, BUTTONS, NO_MODIFIER
-    )
+    return _drag_event(QDragMoveEvent, mime)
 
 
 def drop_event(mime: QMimeData) -> QDropEvent:

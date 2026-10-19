@@ -304,3 +304,145 @@ def test_apply_theme_sets_palette_on_each_open_window(
     assert window.tabs._bar.palette().color(QPalette.ColorRole.Window) == expected.color(
         QPalette.ColorRole.Window
     )
+
+
+# ----------------------------------------------------------------------
+# 「見張りそのもの」が黙って無効にならないこと（2026-10-11・73 回目に追加）
+#
+# 上の 2 つの @pytest.mark.parametrize は、どちらも theme.py 側の
+# タプルを**件数の素**にしている。タプルを空にすると pytest は
+# 「空の parametrize」を**既定で skip** するだけなので、
+# `filterwarnings = error` にも引っかからず、**赤 1 件も出ないまま
+# 最重要の制約が検査されなくなる**（73 回目に実測：
+# EXCLUDED_QSS_SELECTORS を () にしても `35 passed, 2 skipped`）。
+# 件数を減らす（1 つだけ外す）場合も同じで、黙って検査が薄くなる。
+# ----------------------------------------------------------------------
+
+
+def test_excluded_selectors_cover_the_editor_widget_class_hierarchy() -> None:
+    """本文ウィジェットの**継承の連なり**を 1 つも欠かさず除外していること。
+
+    QSS の型セレクタは**派生クラスにも効く**ため、``EditorWidget`` の基底
+    クラスのどれ 1 つでも除外し忘れると、そのセレクタを書いた時点で
+    本文の配色（``set_editor_colors()``）が奪われる。
+
+    ここを**継承の連なりから自動で突き合わせている**のが肝心な点。
+    固定の一覧を突き合わせるだけだと、``EditorWidget`` の基底クラスを
+    （``QTextEdit`` から ``QPlainTextEdit`` へ等）差し替えたときに、
+    一覧の方が古びたことに誰も気づけない。
+
+    73 回目にこれで ``QFrame`` の抜けが見つかった（offscreen で実測して、
+    ``QWidget`` と同じように本文の背景を塗り替えることを確認済み）。
+    """
+    from editor_app.editor import EditorWidget
+
+    # QSS のセレクタになりうる Qt の基底クラスだけを見る
+    # （QObject・QPaintDevice はウィジェットではないので対象外）。
+    targetable = {
+        cls.__name__
+        for cls in EditorWidget.__mro__
+        if cls.__name__.startswith("Q")
+    } - {"QObject", "QPaintDevice"}
+
+    assert targetable, "継承の連なりから Qt の型が 1 つも取れていない"
+    missing = targetable - set(EXCLUDED_QSS_SELECTORS)
+    assert not missing, f"本文の基底クラスが QSS の除外から漏れている: {sorted(missing)}"
+
+
+def test_excluded_qss_selectors_keeps_every_documented_widget_type() -> None:
+    """除外の一覧が**空にも短くもならない**こと（見張りの件数の素）。
+
+    継承の連なりから導けない ``QPlainTextEdit``（いまの ``EditorWidget`` は
+    ``QTextEdit`` 派生だが、モジュール冒頭の厳守事項が名指しで禁じている）も
+    ここで固定する。
+    """
+    required = {
+        "QWidget",
+        "QAbstractScrollArea",
+        "QFrame",
+        "QPlainTextEdit",
+        "QTextEdit",
+    }
+    missing = required - set(EXCLUDED_QSS_SELECTORS)
+    assert not missing, f"QSS の除外から外してはいけない型が消えている: {sorted(missing)}"
+
+
+def test_required_scrollbar_subcontrols_keeps_every_space_taking_subcontrol() -> None:
+    """スクロールバーのサブコントロール一覧が**空にも短くもならない**こと。
+
+    部分指定は禁止（モジュール冒頭の厳守事項）。指定し漏れたサブコントロールは
+    「場所は取るのに何も描かれない空白」になる。ここが空や短いままになると、
+    上の ``test_scroll_bar_qss_defines_every_subcontrol`` が**黙って
+    検査しなくなる**。
+    """
+    required = {"handle", "add-line", "sub-line", "add-page", "sub-page"}
+    missing = required - set(REQUIRED_SCROLLBAR_SUBCONTROLS)
+    assert not missing, f"必ず指定するサブコントロールが一覧から消えている: {sorted(missing)}"
+
+
+# ----------------------------------------------------------------------
+# 自前描画のタブバーが頼りにしているパレットのロール（73 回目に追加）
+#
+# QSS はメニュー・ボタン等にしか効かず、`MultiRowTabBar` は
+# `QPalette` **だけ**が頼り。ここが抜けると、プラットフォームテーマの
+# 既定色がそのまま出る（ライトを選んでいるのに KDE のダークが透ける、
+# というこのモジュールの作り直しの発端そのものの形で出る）。
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("theme", [THEME_LIGHT, THEME_DARK])
+def test_palette_sets_every_role_the_self_drawn_tab_bar_reads(theme: str) -> None:
+    """``MultiRowTabBar`` が読むロールが、すべてテーマの色になっていること。
+
+    参照箇所（``tab_bar.py``）:
+
+    - ``windowText`` … 選択中のタブの文字色
+    - ``buttonText`` … 非選択のタブの文字色・閉じるボタンの ✕
+    - ``highlight`` … 現在のタブを示す下線・閉じるボタンのホバー円
+    - ``highlightedText`` … ホバー中の閉じるボタンの ✕
+    """
+    palette = palette_for(theme)
+    colors = colors_for(theme)
+
+    for role_name, color_key in (
+        ("windowText", "window_text"),
+        ("buttonText", "button_text"),
+        ("highlight", "highlight"),
+        ("highlightedText", "highlighted_text"),
+    ):
+        actual = getattr(palette, role_name)().color()
+        assert actual == QColor(colors[color_key]), (
+            f"{role_name} がテーマの色になっていない"
+            f"（{actual.name()} != {colors[color_key]}）"
+        )
+
+
+@pytest.mark.parametrize("theme", [THEME_LIGHT, THEME_DARK])
+def test_tab_bar_text_colors_follow_the_theme(window: MainWindow, theme: str) -> None:
+    """実際のタブバーの文字色が、テーマ適用で追従すること（上の実利用側）。"""
+    app = QApplication.instance()
+
+    apply_theme(app, theme)
+
+    bar = window.tabs.tabBar()
+    colors = colors_for(theme)
+    assert bar.tab_text_color(selected=True) == QColor(colors["window_text"])
+    assert bar.tab_text_color(selected=False) == QColor(colors["button_text"])
+
+
+@pytest.mark.parametrize("theme", [THEME_LIGHT, THEME_DARK])
+def test_scroll_bar_handle_keeps_a_minimum_grab_size(theme: str) -> None:
+    """つまみに**掴める大きさの下限**を与えていること。
+
+    実機フィードバックは「ダークでつまみを見つけづらい」だったので、
+    色のはっきり差（``tc-handle-hover`` 等）だけでなく**大きさ**も要る。
+    下限が無いと、行数の多いファイルではつまみが数ピクセルの線になり、
+    狙って掴めなくなる（色をどれだけ離しても掴めない）。
+    """
+    body = _strip_qss_comments(stylesheet_for(theme))
+
+    sizes = re.findall(r"min-(?:height|width):\s*(\d+)px", body)
+    assert len(sizes) >= 2, "縦・横それぞれのつまみに下限が指定されていない"
+    assert all(int(value) >= 20 for value in sizes), (
+        f"つまみの下限が小さすぎて掴めない: {sizes}"
+    )

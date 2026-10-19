@@ -481,6 +481,31 @@ def test_on_tab_double_clicked_tears_off_to_new_window(window: MainWindow) -> No
     assert editor.toPlainText() == "ダブルクリックで切り離す"
 
 
+def test_on_tab_double_clicked_puts_the_new_window_below_right(window: MainWindow) -> None:
+    """ダブルクリックで切り離した窓は、元の窓の**右下**に出ること。
+
+    元の窓とぴったり重ねて出すと、タイトルバーも本文も同じ位置に重なる
+    ため、利用者からは**切り離せたのか分からない**（「ダブルクリックが
+    効かない」という形の不具合に見える）。逆に左や上へずらすと、元の窓が
+    画面の左上際にあるときに画面の外へ寄ってしまう。
+
+    固定するのは**ずらす向きだけ**で、何 px ずらすかは縛らない（見た目の
+    好みでいつ変えてもよい数字なので、px を固定するとテストが邪魔になる）。
+    2026-10-11（73 回目）に変異テストで見つけた穴——向きを逆にしても
+    テストは 1 件も赤くならなかった。
+    """
+    window.new_file()  # 切り離しても元の窓が残るように 2 タブにする
+    window.move(200, 150)
+    editor = window.editors()[0]
+
+    window._on_tab_double_clicked(window.tabs.indexOf(editor))
+
+    others = [w for w in MainWindow.open_windows() if w is not window]
+    assert len(others) == 1
+    assert others[0].pos().x() > window.pos().x()
+    assert others[0].pos().y() > window.pos().y()
+
+
 def test_on_tab_double_clicked_closes_window_when_now_empty(
     window: MainWindow,
 ) -> None:
@@ -537,6 +562,25 @@ def test_tear_off_via_menu_creates_new_window(window: MainWindow) -> None:
     assert len(others) == 1
     assert others[0].tabs.indexOf(editor) >= 0
     assert window.tabs.indexOf(editor) < 0
+
+
+def test_tear_off_via_menu_puts_the_new_window_below_right(window: MainWindow) -> None:
+    """メニューからの分離も、ダブルクリックと同じ向き（右下）に出ること。
+
+    同じ計算が 2 か所に書かれているので、片方だけ直しても気づけるように
+    両方を縛る（Wayland ではドラッグが効かないことがあり、**メニューが
+    唯一の分離手段になる**ので、こちらだけ向きが違うと困る）。
+    """
+    window.new_file()
+    window.move(200, 150)
+    editor = window.editors()[0]
+
+    window._tear_off_via_menu(editor)
+
+    others = [w for w in MainWindow.open_windows() if w is not window]
+    assert len(others) == 1
+    assert others[0].pos().x() > window.pos().x()
+    assert others[0].pos().y() > window.pos().y()
 
 
 def test_tear_off_via_menu_closes_the_source_window_when_now_empty(

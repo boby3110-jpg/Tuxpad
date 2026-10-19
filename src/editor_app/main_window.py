@@ -239,10 +239,21 @@ class MainWindow(
         「最後にアクティブにしたウィンドウ」（ファイルマネージャー等から
         別のファイルを開いたときの読み込み先の選択肢の 1 つ、実機
         フィードバックにより追加）の判定に使う。
+
+        **あわせて、ネットワーク上のファイルの外部変更も 1 回見に行く**
+        （引き継ぎ ⑭）。NAS/rclone の向こう側の書き込みは inotify に
+        届かないため、普段は 45 秒おきのポーリング
+        (:data:`~editor_app.file_watch.NETWORK_POLL_INTERVAL_MS`) で
+        気づくことになる。他のアプリで同じファイルを直してこちらへ
+        戻ってきた直後は、**その 45 秒を待たせたくない**ので、戻って
+        きた瞬間にも同じ確認を走らせる（ローカルのタブしか無ければ
+        :meth:`~editor_app.file_watch.FileWatchMixin._poll_network_files`
+        は ``stat`` を 1 回もせずに帰る）。
         """
         if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
             MainWindow._activation_counter += 1
             self._last_activated_at = MainWindow._activation_counter
+            self._poll_network_files()
         super().changeEvent(event)
 
     # ------------------------------------------------------------------

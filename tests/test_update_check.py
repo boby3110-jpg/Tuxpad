@@ -405,3 +405,179 @@ def test_show_update_message_asks_dialogs_with_this_window_as_parent(
             QMessageBox.StandardButton.No,
         )
     ]
+
+
+# ----------------------------------------------------------------------
+# 71 回目（仕上げの見直し）で足したぶん。
+#
+# `update_check.py` をわざと壊してみたところ、下の 5 通りはテストが
+# 赤くならなかった。``shown`` はボタンの指定を捨てているので、
+# **「はい／いいえ」が「OK」1 つに化けても気づけない**状態だった。
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def asked(window: MainWindow, monkeypatch):
+    """``shown`` と違い、**ボタンの指定まで**記録する。
+
+    戻り値は ``(icon, title, text, buttons, default_button)`` が溜まるリスト。
+    """
+    calls: list[tuple] = []
+
+    def fake(icon, title, text, buttons=QMessageBox.StandardButton.Ok,
+             default_button=QMessageBox.StandardButton.NoButton):
+        calls.append((icon, title, text, buttons, default_button))
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(window, "_show_update_message", fake)
+    return calls
+
+
+def test_update_prompt_offers_yes_and_no(window: MainWindow, asked, monkeypatch) -> None:
+    """「更新しますか？」は**「はい」「いいえ」の二択**で尋ねること。
+
+    ここが「OK」1 つに化けると、閉じ方によらず「はい」と同じ答えが返り、
+    **断る手段が無いまま更新が走る**。
+    """
+    monkeypatch.setattr(
+        "editor_app.update_check.apply_update", lambda *a, **k: UpdateResult(True)
+    )
+
+    window._handle_update_check_result(
+        status(STATE_UPDATE_AVAILABLE, count=1, target="abc123"), True
+    )
+
+    _icon, _title, _text, buttons, default_button = asked[0]
+    assert buttons == (
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+    )
+    # Enter を押したときの答え（現状は「はい」）。取り込みは ``--ff-only``
+    # しかしないので、既定が「はい」でも手元の変更は消えない。
+    assert default_button == QMessageBox.StandardButton.Yes
+
+
+def test_update_prompt_is_a_question(window: MainWindow, asked, monkeypatch) -> None:
+    """尋ねるときの印が「問いかけ」であること（お知らせと見分けがつくように）。"""
+    monkeypatch.setattr(
+        "editor_app.update_check.apply_update", lambda *a, **k: UpdateResult(True)
+    )
+
+    window._handle_update_check_result(
+        status(STATE_UPDATE_AVAILABLE, count=1, target="abc123"), True
+    )
+
+    assert asked[0][0] == QMessageBox.Icon.Question
+
+
+def test_manual_check_outside_git_result_explains_instead_of_warning(
+    window: MainWindow, shown
+) -> None:
+    """``STATE_UNSUPPORTED`` は「確認できませんでした」ではなく、理由を述べること。
+
+    git 管理外の導入（tarball 等）は**壊れているわけではない**ので、
+    警告の印で「更新を確認できませんでした」と出すと、利用者は直せない
+    不具合を疑って探し回ることになる。
+    """
+    window._handle_update_check_result(status(STATE_UNSUPPORTED, detail="理由"), True)
+
+    icon, _title, text = shown[0]
+    assert icon == QMessageBox.Icon.Information
+    assert "git" in text
+    assert "確認できませんでした" not in text
+
+
+# ----------------------------------------------------------------------
+# 「確認中」の印（二重に走らせないための鍵）
+# ----------------------------------------------------------------------
+
+
+def test_check_marks_itself_as_running_while_the_worker_runs(
+    window: MainWindow, qtbot, monkeypatch
+) -> None:
+    """確認を**始めた時点で**「確認中」の印を立てること。
+
+    印を立てるのは別スレッドを起こす前。ここが抜けると
+    ``check_for_updates_manually`` の二重起動の見張りが素通りして、
+    ``git fetch`` が同時に何本も走る。
+    """
+    import threading
+
+    gate = threading.Event()
+    seen: list[bool] = []
+
+    def fake_check(_repo_root):
+        seen.append(window._update_check_running)
+        gate.set()
+        return UpdateStatus(STATE_UP_TO_DATE)
+
+    monkeypatch.setattr("editor_app.update_check.check_for_updates", fake_check)
+    monkeypatch.setattr(window, "_handle_update_check_result", lambda *a: None)
+    window._update_signals.finished.disconnect()
+    window._update_signals.finished.connect(window._handle_update_check_result)
+    window._update_check_running = False
+
+    window._start_update_check(manual=True)
+
+    qtbot.waitUntil(gate.is_set, timeout=5000)
+    assert seen == [True]
+
+
+def test_second_manual_check_is_refused_while_the_first_still_runs(
+    window: MainWindow, asked, qtbot, monkeypatch
+) -> None:
+    """実際に 1 本走らせたまま、もう一度押しても 2 本目を起こさないこと。
+
+    既存のテストは ``_update_check_running`` を手で立ててから押していたので、
+    **印を立てる側（`_start_update_check`）が壊れても緑のまま**だった。
+    """
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    checks: list[int] = []
+
+    def fake_check(_repo_root):
+        checks.append(1)
+        started.set()
+        release.wait(5)
+        return UpdateStatus(STATE_UP_TO_DATE)
+
+    monkeypatch.setattr("editor_app.update_check.check_for_updates", fake_check)
+    monkeypatch.setattr(window, "_handle_update_check_result", lambda *a: None)
+    window._update_signals.finished.disconnect()
+    window._update_signals.finished.connect(window._handle_update_check_result)
+    window._update_repo_root = Path("/どこか/tuxpad")
+    window._update_check_running = False
+
+    window.check_for_updates_manually()
+    qtbot.waitUntil(started.is_set, timeout=5000)
+    window.check_for_updates_manually()
+    release.set()
+    window._update_check_thread.join(5)
+
+    assert checks == [1]
+    assert asked and "確認しています" in asked[0][2]
+
+
+def test_check_thread_does_not_hold_up_quitting(
+    window: MainWindow, qtbot, monkeypatch
+) -> None:
+    """確認スレッドは daemon であること（終了を待たせない）。
+
+    ``git fetch`` は相手が黙っていると ``GIT_TIMEOUT_SECONDS`` 秒ぶら下がる。
+    daemon でないと、その間**ウィンドウを全部閉じてもプロセスが残る**
+    （利用者からは「閉じたのにアイコンが消えない」「もう一度起動しても
+    前のが居座る」に見える）。
+    """
+    monkeypatch.setattr(
+        "editor_app.update_check.check_for_updates",
+        lambda _repo_root: UpdateStatus(STATE_UP_TO_DATE),
+    )
+    monkeypatch.setattr(window, "_handle_update_check_result", lambda *a: None)
+    window._update_signals.finished.disconnect()
+    window._update_signals.finished.connect(window._handle_update_check_result)
+
+    window._start_update_check(manual=False)
+
+    assert window._update_check_thread.daemon is True
+    window._update_check_thread.join(5)

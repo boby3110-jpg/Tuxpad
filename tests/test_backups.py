@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -400,6 +401,110 @@ def test_prune_keeps_going_when_an_empty_directory_cannot_be_removed(
     assert [d.name for d in backups.backup_root().iterdir()] == [copy.parent.name]
 
 
+def test_removing_a_backup_that_is_already_gone_does_nothing(tmp_path: Path) -> None:
+    """``_remove_entry`` の docstring の約束（「既に無ければ何もしない」）。
+
+    この約束は ``unlink(missing_ok=True)`` の 2 文字で成り立っていて、
+    **外すと誰も赤くならなかった**（74 回目に変異で確かめた）。掃除は
+    ``backup_file`` → ``prune`` の経路で**控えを取るたびに走る**ので、
+    ここで例外が漏れると保存・復元の経路まで巻き込まれる。
+    """
+    entry = backups.BackupEntry(
+        backups.backup_root() / "どこか" / f"もう無い{backups.BACKUP_SUFFIX}",
+        tmp_path / "sample.txt",
+        datetime.now(),
+        0,
+    )
+
+    backups._remove_entry(entry)  # 例外を上げないこと（戻り値は無い）
+
+
+def test_prune_keeps_going_when_a_backup_vanishes_before_it_is_removed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """一覧に出たあとで複製が消えても、掃除は成功として終わる。
+
+    控えの置き場は共有のキャッシュなので、**一覧を作った時点では在った
+    ファイルが、消す時点では無い**ことがある（利用者自身の
+    ``rm -rf ~/.cache/tuxpad``、バックアップ用具、別の掃除）。
+    ``all_backups()`` は複製を ``glob`` して ``stat`` するので、
+    一覧に乗った時点では必ず在る——**だからこの隙間しか無い**。
+    """
+    path = tmp_path / "sample.txt"
+    path.write_text("古い\n", encoding="utf-8")
+    old = backups.backup_file(path, now=datetime.now() - timedelta(days=40))
+    path.write_text("新しい\n", encoding="utf-8")
+    fresh = backups.backup_file(path)
+    _backdate(old, datetime.now() - timedelta(days=40))
+
+    real_all_backups = backups.all_backups
+
+    def vanish_after_listing():
+        entries = real_all_backups()
+        old.unlink()  # 一覧に出たあと、消しに行く前に消える
+        return entries
+
+    monkeypatch.setattr(backups, "all_backups", vanish_after_listing)
+
+    removed = backups.prune()
+
+    assert removed == [old]
+    # 複製は（他の誰かの手で）消えている。索引はこちらが片付けること。
+    assert not old.exists()
+    assert not old.with_suffix(backups.INDEX_SUFFIX).exists()
+    assert fresh.exists()
+
+
+def test_prune_keeps_going_when_an_index_vanishes_before_it_is_removed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """索引の側が先に消えていても同じ（複製は片付けること）。"""
+    path = tmp_path / "sample.txt"
+    path.write_text("古い\n", encoding="utf-8")
+    old = backups.backup_file(path, now=datetime.now() - timedelta(days=40))
+    path.write_text("新しい\n", encoding="utf-8")
+    fresh = backups.backup_file(path)
+    _backdate(old, datetime.now() - timedelta(days=40))
+
+    real_all_backups = backups.all_backups
+
+    def vanish_after_listing():
+        entries = real_all_backups()
+        old.with_suffix(backups.INDEX_SUFFIX).unlink()
+        return entries
+
+    monkeypatch.setattr(backups, "all_backups", vanish_after_listing)
+
+    removed = backups.prune()
+
+    assert removed == [old]
+    assert not old.exists()
+    assert fresh.exists()
+
+
+def test_prune_ignores_stray_files_in_the_backup_root(tmp_path: Path) -> None:
+    """控えの置き場にディレクトリでないものが紛れていても、掃除は通ること。
+
+    置き場の中身は「元のファイルごとのディレクトリ」だけのつもりだが、
+    共有のキャッシュなので別のものが紛れうる（古い版の残骸、同期用具が
+    置くしるし、利用者が覗いたときの取り違え）。``all_backups()`` は
+    ``if bucket.is_dir()`` で読み飛ばしているので、**片付けの側も同じように
+    読み飛ばさないと釣り合わない**——``iterdir()`` をディレクトリでない
+    ものに対して呼ぶと ``NotADirectoryError`` になり、``try`` の外なので
+    そのまま ``prune`` を抜けて**控えを取るたびに巻き込まれる**。
+    """
+    path = tmp_path / "sample.txt"
+    path.write_text("一\n", encoding="utf-8")
+    copy = backups.backup_file(path)
+    stray = backups.backup_root() / "まぎれこみ.txt"
+    stray.write_text("これはディレクトリではない\n", encoding="utf-8")
+
+    assert backups.prune() == []  # 捨てる控えは無い
+
+    assert stray.exists()  # 身に覚えのないものを勝手に消さないこと
+    assert copy.exists()
+
+
 def test_prune_on_an_empty_cache_does_nothing(tmp_path: Path) -> None:
     """まだ一度も控えていない（置き場すら無い）状態でも落ちない。"""
     assert not backups.backup_root().exists()
@@ -567,6 +672,33 @@ def test_restore_menu_lists_backups_newest_first(
     entries = backups.list_backups(sjis_file)
     assert chosen.items == [backups.describe_entry(entry) for entry in entries]
     assert entries[0].saved_at >= entries[1].saved_at
+
+
+def test_the_restore_list_shows_the_date_time_and_size_of_each_backup(
+    window: MainWindow, sjis_file: Path, chosen
+) -> None:
+    """一覧に**実際に並ぶ文字列**の形を確かめる（`describe_entry` を通さずに）。
+
+    ひとつ上のテストは ``chosen.items == [describe_entry(entry) ...]`` と
+    **同じ関数どうしを見比べている**ため、この 1 行から日付・秒・大きさの
+    どれが落ちても赤くならない。利用者はこの 1 行だけを見て「どの時点の
+    控えで今のファイルを上書きするか」を決める（どのファイルの控えかは
+    そもそも出ない）ので、字面そのものを固定しておく。
+
+    1 行の中身（単位の切り替わり・秒・日付）は
+    `tests/test_backup_listing.py` 側で細かく見ている。
+    """
+    editor = window.open_path(sjis_file)
+    edit_text(editor, "1 回目\n")
+    window.save_editor(editor)
+    chosen.index = None  # 一覧を見るだけ
+
+    assert window.restore_from_backup() is False
+
+    (line,) = chosen.items
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}（\d+(\.\d)? (B|KB|MB)）", line
+    ), line
 
 
 def test_restore_without_any_backup_says_so(
