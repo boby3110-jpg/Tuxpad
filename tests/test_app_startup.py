@@ -21,6 +21,10 @@
   テストから決めるため（本物は実際にソケットへ繋ぎに行く）
 * ``check_for_updates_on_startup()`` … 本物は ``git fetch`` を別スレッドで
   始めてしまう
+* ``StallMonitor`` … 本物は ``faulthandler`` の見張りを張る。見張りは
+  プロセスに 1 つしか無く、pytest もテストの時間切れ
+  （``faulthandler_timeout``）に使っているので、本物を張ると壊れる
+  （そのうえ利用者の ``~/.local/state/tuxpad/stall.log`` に書いてしまう）
 """
 
 from __future__ import annotations
@@ -52,6 +56,10 @@ class _MainRun:
         #: apply_theme / migrate_legacy_settings が呼ばれた順と、そのときの
         #: ウィンドウ数（「ウィンドウを作る前か後か」を見るため）。
         self.events: list[tuple[str, int]] = []
+        #: 起動された固まりの見張り（StallMonitor）の (親, そのときウィンドウが
+        #: 見えていたか)。``events`` とは別に持つ（あちらは設定まわりの順番
+        #: だけを見るテストがある）。
+        self.stall_monitors: list[tuple[object, bool]] = []
 
     @property
     def window(self) -> MainWindow:
@@ -87,11 +95,21 @@ def run_main(monkeypatch, qtbot):
     def _migrate() -> None:
         record.events.append(("migrate", len(MainWindow.open_windows())))
 
+    class _FakeStallMonitor:
+        def __init__(self, parent=None, **_kwargs) -> None:
+            self._parent = parent
+
+        def start(self) -> None:
+            windows = MainWindow.open_windows()
+            visible = bool(windows) and all(win.isVisible() for win in windows)
+            record.stall_monitors.append((self._parent, visible))
+
     monkeypatch.setattr(app_module, "try_forward_to_running_instance", _forward)
     monkeypatch.setattr(app_module, "apply_theme", _apply_theme)
     monkeypatch.setattr(app_module, "migrate_legacy_settings", _migrate)
     monkeypatch.setattr(QApplication, "exec", _exec)
     monkeypatch.setattr(MainWindow, "check_for_updates_on_startup", _check_updates)
+    monkeypatch.setattr(app_module, "StallMonitor", _FakeStallMonitor)
 
     def factory(argv: list[str], *, forwarded: bool = False) -> _MainRun:
         _forward.result = forwarded
@@ -274,6 +292,7 @@ def test_main_does_not_touch_settings_when_forwarding(run_main) -> None:
 
     assert record.events == []
     assert record.update_checks == 0
+    assert record.stall_monitors == []
 
 
 # ----------------------------------------------------------------------
@@ -363,6 +382,21 @@ def test_main_defers_the_startup_update_check(run_main, qtbot) -> None:
     qtbot.wait(50)  # QTimer.singleShot(0, ...) が配送される
 
     assert record.update_checks == 1
+
+
+def test_main_starts_the_stall_monitor_once_after_showing_the_window(
+    run_main,
+) -> None:
+    """固まり調査の見張り（diagnostics.py）は、実際の起動で 1 回だけ張る。
+
+    ウィンドウを出した**後**に張る（ウィンドウを作る・ファイルを開く間の
+    重さは「固まり」ではないので、そこで記録が出ると調査の邪魔になる）。
+    親は QApplication（アプリが動いている間ずっと見張り続けるため。親が
+    無いと、``main()`` を抜けた時点で見張りごと消えうる）。
+    """
+    record = run_main(["tuxpad"])
+
+    assert record.stall_monitors == [(QApplication.instance(), True)]
 
 
 def test_main_opens_paths_forwarded_by_another_process(

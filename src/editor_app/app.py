@@ -10,6 +10,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from . import APP_NAME, __version__
+from .diagnostics import StallMonitor
 from .fileio import resolve_path
 from .ipc import InstanceServer, try_forward_to_running_instance
 from .main_window import MainWindow, raise_window
@@ -176,6 +177,11 @@ def main(argv: list[str] | None = None) -> int:
         window.open_paths(file_paths)
 
     window.show()
+
+    # 画面が一瞬固まる不具合の調査用の見張り（diagnostics.py、2026-10-20）。
+    # 止まった瞬間のスタックを ~/.local/state/tuxpad/stall.log に残す。
+    # app に親付けしておくことで、アプリが動いている間ずっと見張り続ける。
+    StallMonitor(app).start()
 
     # 起動時の更新確認（git clone 導入時のみ。設定で OFF にできる）。
     # ウィンドウを出したあとにイベントループへ乗せてから走らせる

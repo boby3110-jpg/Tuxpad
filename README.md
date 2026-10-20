@@ -213,6 +213,8 @@ src/
     update_check.py      いつ更新を確認し、どう尋ねるか（ダイアログ側）
     theme.py             ライト / ダークテーマの QSS 生成と適用
     ipc.py               シングルインスタンス化（起動中のプロセスへの転送）
+    diagnostics.py       画面が固まった瞬間の記録（止まっていた間の処理を
+                         ~/.local/state/tuxpad/stall.log へ。普段は何も書かない）
     resources/           アプリアイコン（各サイズの PNG）
 packaging/               .desktop エントリと起動ラッパーのテンプレート
 tests/                   pytest（offscreen で実行）

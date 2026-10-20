@@ -845,3 +845,136 @@ def test_a_relative_path_is_not_taken_for_a_network_file(
     （＝取り違えても誰も気づけない）。
     """
     assert _is_network(mount_table, "メモ.txt", monkeypatch) is False
+
+
+# ----------------------------------------------------------------------
+# 見回りが遅かったら診断ログに残す（固まり調査、2026-10-20）
+# ----------------------------------------------------------------------
+class _SlowStat:
+    """``file_signature`` をパスごとに決めた秒数だけ「遅く」する。
+
+    本当に眠らせる代わりに、見回りが使う時計
+    (:data:`~editor_app.file_watch._poll_clock`) を進める。
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, delays: dict[Path, float]) -> None:
+        self.now = 0.0
+        self.delays = {str(path): seconds for path, seconds in delays.items()}
+        real = file_watch.file_signature
+
+        def slow_signature(path: Path):
+            self.now += self.delays.get(str(path), 0.0)
+            return real(path)
+
+        monkeypatch.setattr(file_watch, "_poll_clock", lambda: self.now)
+        monkeypatch.setattr(file_watch, "file_signature", slow_signature)
+
+
+@pytest.fixture
+def diagnostics_log(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    logged: list[str] = []
+    monkeypatch.setattr(file_watch, "log_diagnostic", logged.append)
+    return logged
+
+
+def _open_network_files(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int
+) -> list[Path]:
+    paths = []
+    for index in range(count):
+        path = tmp_path / f"共有{index}.txt"
+        path.write_text(f"{index}\n", encoding="utf-8")
+        paths.append(path)
+    _pretend_network(monkeypatch, *paths)
+    for path in paths:
+        assert window.open_path(path) is not None
+    return paths
+
+
+def test_slow_poll_logs_the_slowest_files(
+    window: MainWindow,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    diagnostics_log: list[str],
+) -> None:
+    """遅かったら、合計・件数・遅い順 3 件を 1 行で残す。
+
+    「どのマウント先が遅いのか」が分かれば足りるので 3 件まで。全部書くと
+    タブの数だけ並んで読めなくなる。
+    """
+    paths = _open_network_files(window, tmp_path, monkeypatch, 4)
+    _SlowStat(
+        monkeypatch,
+        {paths[0]: 0.010, paths[1]: 0.040, paths[2]: 0.005, paths[3]: 0.100},
+    )
+
+    window._poll_network_files()
+
+    assert len(diagnostics_log) == 1
+    message = diagnostics_log[0]
+    assert "155ms かかりました" in message
+    assert "4 件 stat" in message
+    detail = message.split("遅い順: ", 1)[1]
+    assert detail == f"100ms {paths[3]}、40ms {paths[1]}、10ms {paths[0]}）"
+
+
+def test_fast_poll_logs_nothing(
+    window: MainWindow,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    diagnostics_log: list[str],
+) -> None:
+    """普段（速いとき）は 1 行も書かない。毎回書くと 45 秒ごとに記録が育つ。"""
+    paths = _open_network_files(window, tmp_path, monkeypatch, 2)
+    _SlowStat(monkeypatch, {paths[0]: 0.030, paths[1]: 0.069})
+
+    window._poll_network_files()
+
+    assert diagnostics_log == []
+
+
+def test_poll_of_exactly_the_slow_limit_is_logged(
+    window: MainWindow,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    diagnostics_log: list[str],
+) -> None:
+    paths = _open_network_files(window, tmp_path, monkeypatch, 2)
+    _SlowStat(monkeypatch, {paths[0]: 0.05, paths[1]: 0.05})
+
+    window._poll_network_files()
+
+    assert len(diagnostics_log) == 1
+
+
+def test_slow_poll_counts_only_the_files_it_stat_ed(
+    window: MainWindow,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    diagnostics_log: list[str],
+) -> None:
+    """ローカルのタブ・無題のタブは見回らないので、件数にも入れない。"""
+    shared = tmp_path / "共有.txt"
+    shared.write_text("共有\n", encoding="utf-8")
+    local = tmp_path / "ローカル.txt"
+    local.write_text("ローカル\n", encoding="utf-8")
+    _pretend_network(monkeypatch, shared)
+    window.open_path(shared)
+    window.open_path(local)
+    _SlowStat(monkeypatch, {shared: 0.2, local: 5.0})
+
+    window._poll_network_files()
+
+    assert len(diagnostics_log) == 1
+    assert "200ms かかりました" in diagnostics_log[0]
+    assert "1 件 stat" in diagnostics_log[0]
+    assert str(local) not in diagnostics_log[0]
+
+
+def test_slow_poll_limit_is_a_noticeable_pause() -> None:
+    """記録のしきい値は「引っかかり」と感じ始める程度の 0.05〜0.5 秒。
+
+    小さすぎると毎回書かれて肝心の記録が埋もれ、大きすぎると 1 秒の
+    固まりの中で見回りが占めていた分を見落とす。
+    """
+    assert 0.05 <= file_watch.SLOW_POLL_SECONDS <= 0.5

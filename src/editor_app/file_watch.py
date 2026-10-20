@@ -57,6 +57,7 @@ Linux の cifs クライアントが inotify へ流さない）。そこで**自
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 # shiboken6 は PySide6 の土台（バインディングの実体）で、``PySide6.QtCore`` を
@@ -66,9 +67,19 @@ import shiboken6
 from PySide6.QtCore import QFileSystemWatcher, QTimer
 from PySide6.QtWidgets import QMessageBox
 
+from .diagnostics import log_diagnostic
 from .dialogs import show_message_box
 from .editor import EditorWidget, document_text
 from .fileio import file_signature, read_text_file_detail, resolve_path
+
+#: 見回り 1 回（:meth:`FileWatchMixin._poll_network_files`）にこれ以上
+#: かかったら、どのファイルで何ミリ秒かを診断ログに残す（秒）。
+#: 見回りは画面の処理の中で走るので、ここが遅いとそのまま「固まり」になる
+#: （2026-10-20、最前面に出すと 1 秒固まるという実機報告の切り分け用）。
+SLOW_POLL_SECONDS = 0.1
+
+#: 見回りの所要時間を測る時計。テストから差し替えられるように変数にしてある。
+_poll_clock = time.perf_counter
 
 #: 開いているファイルが外部で変わってから、再読み込みの確認を出すまでの
 #: 待ち時間 (ms)。連続した書き込みや temp→rename 方式の保存を 1 回に
@@ -376,11 +387,15 @@ class FileWatchMixin:
         if self._long_operation_active:
             return
         found = False
+        started = _poll_clock()
+        timings: list[tuple[float, Path]] = []
         for editor in self.editors():
             path = editor.path
             if path is None or not self._is_network_path(path):
                 continue
+            stat_started = _poll_clock()
             signature = file_signature(path)
+            timings.append((_poll_clock() - stat_started, path))
             if signature == editor.disk_signature:
                 continue
             if signature == self._declined_reload_signatures.get(str(path)):
@@ -388,8 +403,25 @@ class FileWatchMixin:
                 continue
             self._pending_reload_paths.add(str(path))
             found = True
+        self._report_slow_poll(_poll_clock() - started, timings)
         if found:
             self._reload_check_timer.start()
+
+    @staticmethod
+    def _report_slow_poll(elapsed: float, timings: list[tuple[float, Path]]) -> None:
+        """見回りが :data:`SLOW_POLL_SECONDS` 以上かかったら診断ログに残す。
+
+        遅かった順に 3 件だけ書く（どのファイル＝どのマウント先が遅いのかが
+        分かれば足りる。全部書くと 1 回で何十行にもなる）。
+        """
+        if elapsed < SLOW_POLL_SECONDS:
+            return
+        slowest = sorted(timings, key=lambda item: item[0], reverse=True)[:3]
+        detail = "、".join(f"{seconds * 1000:.0f}ms {path}" for seconds, path in slowest)
+        log_diagnostic(
+            f"ネットワーク上のファイルの見回りに {elapsed * 1000:.0f}ms かかりました"
+            f"（{len(timings)} 件 stat。遅い順: {detail}）"
+        )
 
     def _find_editor_for_watched_path(self, path: str) -> EditorWidget | None:
         """``QFileSystemWatcher`` から渡されたパスのタブを探す。
