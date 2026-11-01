@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import pytest
 from PySide6.QtGui import QColor, QTextCursor, QTextOption
 
 from editor_app.editor import (
@@ -164,15 +165,49 @@ def test_soft_wrap_boundary_does_not_get_a_mark(window: MainWindow) -> None:
     assert points[0].y() > first_line_rect.bottom()
 
 
-def test_only_visible_blocks_are_scanned(window: MainWindow) -> None:
-    """大きなファイルでも、画面に見えている行ぶんしか位置を計算しない。"""
+def test_only_visible_blocks_are_scanned(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """大きなファイルでも、画面に見えている行ぶんしか位置を計算しない。
+
+    **返ってくる記号の数だけを見ても、この約束は守れない。** 文書の
+    先頭から舐め始めても、画面より下に出たところで打ち切るので
+    **返る数は同じ**になる（2026-10-25（82 回目）に、変異
+    `ed-lb-from-the-top-of-the-document` が生き残る形で表に出た）。
+    守りたいのは「**何ブロック触ったか**」の方——1 ブロックの位置を
+    訊くたびに、そのブロックは組み立て（折り返しの計算）まで行くので、
+    5 万行のファイルで文書の先頭から舐めると、画面を 1 回描くだけで
+    全部組むことになる。引き継ぎ ⑯ で速くなった理由そのものを
+    打ち消してしまう。
+
+    そこで、位置を訊いた相手（`blockBoundingGeometry`）を数える。
+    """
     editor = window.current_editor()
     _prepare(editor, "\n".join(f"行 {i}" for i in range(5000)))
     editor.set_show_line_breaks(True)
+    # 画面の真ん中あたりまでスクロールしてから数える（先頭のままだと、
+    # 文書の先頭から舐めても「画面の上端から」と区別が付かない）。
+    scrollbar = editor.verticalScrollBar()
+    scrollbar.setValue(scrollbar.maximum() // 2)
+
+    asked: list[int] = []
+    original = type(editor).blockBoundingGeometry
+
+    def counting_block_bounding_geometry(self, block):
+        asked.append(block.blockNumber())
+        return original(self, block)
+
+    monkeypatch.setattr(
+        type(editor), "blockBoundingGeometry", counting_block_bounding_geometry
+    )
 
     points = editor.line_break_mark_points()
 
     assert 0 < len(points) < 100
+    # 触ったブロックは、見えている行ぶん＋打ち切り判定の 1 つぶんだけ。
+    assert len(asked) <= len(points) + 1, f"{len(asked)} ブロックに位置を訊いた"
+    # どれも「いちばん上に見えているブロック」以降のもの。
+    assert min(asked) >= editor.firstVisibleBlock().blockNumber()
 
 
 def test_marks_follow_the_scroll_position(window: MainWindow) -> None:

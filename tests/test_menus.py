@@ -156,10 +156,12 @@ def test_edit_menu_contents(window):
 
 
 def test_view_menu_contents(window):
-    """「表示」には折り返し・改行記号・フォントだけが残り、サブメニューは無い。
+    """「表示」には本文の見え方・動き方（折り返し・改行記号・フォント・
+    ホイールのスクロール量）だけが残り、サブメニューは無い。
 
     配色・テーマ・タブ幅などの「見た目の設定」は「設定」メニューへ移した
-    （実機フィードバックによる再構成）。
+    （実機フィードバックによる再構成）。ホイールのスクロール量は
+    2026-10-26 に足した（本文欄のスクロールなのでフォントの隣）。
     """
     menu = find_menu(window, "表示")
     assert [action.menu() for action in menu.actions() if action.menu() is not None] == []
@@ -169,6 +171,7 @@ def test_view_menu_contents(window):
         window.action_wrap_fixed,
         window.action_show_line_breaks,
         window.action_font,
+        window.action_wheel_scroll_lines,
     ]
 
 

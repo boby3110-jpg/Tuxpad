@@ -195,7 +195,7 @@ def test_ctrl_h_opens_replace_panel_from_editor(window, qtbot):
     QTest.keyClick(editor, Qt.Key.Key_H, Qt.KeyboardModifier.ControlModifier)
 
     assert window.search_panel.isVisible()
-    assert window.search_panel.is_replace_mode()
+    assert window.search_panel._replace_input.isVisible()
 
 
 def test_ctrl_h_does_not_edit_the_text(window, qtbot):

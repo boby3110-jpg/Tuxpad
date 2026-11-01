@@ -164,3 +164,32 @@ def test_one_unopenable_path_does_not_stop_the_rest(
     _handle_forwarded_paths([str(loop_a), str(sample)])
 
     assert window.current_editor().path == sample.resolve()
+
+
+def test_already_open_file_gets_the_keyboard_focus(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """既に開いているタブへ切り替えたら、**本文に入力できる状態**にする。
+
+    タブを選び直すだけではカーソル（入力先）は移らないので、利用者が
+    続けて打った文字が本文に入らない。``editor.setFocus()`` を落としても
+    既存のテストは全件緑だった（84 回目に実測。変異
+    ``app-dedup-no-focus``）。``MainWindow.open_path`` 側の同じ振る舞いは
+    ``tests/test_same_file_guard.py`` が見張っているが、転送の経路
+    （``_handle_forwarded_paths``）は自前で同じことをしているため、
+    別に縛る必要がある。
+
+    ``hasFocus()`` ではなく ``focusWidget()`` を見るのは
+    ``tests/test_same_file_guard.py`` と同じ理由（offscreen では
+    ``activateWindow()`` が効かないため）。
+    """
+    sample = tmp_path / "sample.txt"
+    sample.write_text("内容", encoding="utf-8")
+    existing = window.open_path(sample)
+    window.new_file()
+    window.tabs.tabBar().setFocus()
+    assert window.focusWidget() is not existing
+
+    _handle_forwarded_paths([str(sample)])
+
+    assert window.focusWidget() is existing

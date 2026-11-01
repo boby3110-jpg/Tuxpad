@@ -117,7 +117,7 @@ class SearchReplaceMixin:
         # （EmEditor のように、置換モードでは欄が増えて縦に伸びる）。
         self.search_panel = SearchPanel(self)
         self.search_panel.setWindowFlag(Qt.WindowType.Tool, True)
-        self.search_panel.setWindowTitle("検索")
+        self.search_panel.setWindowTitle("検索・置換")
         self.search_panel.hide()
         # 「利用者が明示的に検索した」ときだけ、ヒット 0 件を音で知らせたい
         # （本文の編集に追随した検索し直しでは鳴らさない）ので、
@@ -150,21 +150,38 @@ class SearchReplaceMixin:
     # 機能 6: ウィンドウ内の全タブを横断する検索 (Ctrl+F)
     # ------------------------------------------------------------------
     def show_search_panel(self) -> None:
-        """検索パネルを検索専用モードで開く。選択中の文字列があれば検索欄に流し込む。"""
-        self.search_panel.set_replace_mode(False)
+        """検索・置換パネルを開く (Ctrl+F)。"""
         self._open_search_panel()
 
     def show_replace_panel(self) -> None:
-        """検索パネルを置換モード（機能 7）で開く。"""
-        self.search_panel.set_replace_mode(True)
+        """検索・置換パネルを開く (Ctrl+H)。
+
+        Ctrl+F と同じパネルを開く（置換行は常に出ている）。分けていた頃は、
+        Ctrl+H のあとに Ctrl+F すると置換用の大きさのまま検索用の中身に
+        なって気持ちが悪かった（2026-10-20 実機フィードバック）。
+        メニュー項目とショートカットは、慣れた操作のまま残してある。
+        """
         self._open_search_panel()
 
     def _open_search_panel(self) -> None:
-        editor = self.current_editor()
-        if editor is not None:
-            # QTextCursor.selectedText() は改行を U+2029 で返すので、
-            # 複数行選択でもそのまま検索欄に渡せるよう SearchPanel 側で変換する。
-            self.search_panel.set_initial_text(editor.textCursor().selectedText())
+        """パネルを開いて検索欄にフォーカスする。**検索はしない。**
+
+        本文で選択中の文字列を検索欄へ流し込むこともしない（2026-10-20、
+        利用者の判断で廃止）。検索欄には前回の語が残っているので、
+        そのまま Enter を押せばその語で検索される。
+
+        開いたときに検索しないのは、固まり対策。以前は開くたびに検索欄の
+        語で全タブを検索しており、ありふれた語だと 1 秒近く画面が止まった。
+        パネルを前面に出す依頼 (activateWindow) は後から効くため、止まって
+        いる間に打った Ctrl+V が**元のタブの本文に貼り付いてしまった**
+        （2026-10-20 実機報告。15.6 万行＋22 タブ・22 万件ヒットで 942ms を
+        実測）。
+        """
+        if not self.search_panel.isVisible():
+            # 閉じている間の結果は本文の編集に追随していない（古い）。
+            # 前回の語は検索欄に残したまま「まだ検索していない」状態に戻し、
+            # Enter で検索してもらう。
+            self.search_panel.forget_results()
         self.search_panel.show()
         # search_panel は独立したフローティングウィンドウなので、
         # focus_input() で Qt 内部のフォーカスを合わせるだけでは
@@ -173,10 +190,6 @@ class SearchReplaceMixin:
         self.search_panel.raise_()
         self.search_panel.activateWindow()
         self.search_panel.focus_input()
-        # パネルを開くこと自体は利用者の明示的な操作なので、ここでは
-        # 1 回だけ検索してよい（選択中の文字列を流し込んだ場合に、すぐ
-        # 件数が出る）。以降はタイプしても検索しない。
-        self._run_search(self.search_panel.query())
 
     def close_search_panel(self) -> None:
         """検索パネルを閉じて、ハイライトを消し、現在のタブへフォーカスを戻す。"""
@@ -300,8 +313,18 @@ class SearchReplaceMixin:
         :attr:`SearchMatch.editor_index` は「このウィンドウの何番目のタブか」
         なので、タブの並びが変わると古い結果は別のタブを指してしまう。
         待たずにその場で検索し直す。
+
+        ただし**前回の検索が重かった**（本文の編集への追随もやめている）
+        ときは検索し直さず、結果を捨てて「まだ検索していない」状態に戻す。
+        タブを開く・閉じるたびに 1 秒近く固まるのを防ぐため。古い結果を
+        残すと別のタブを指してしまうので、残しておくことはしない。
         """
         if self._suspend_search_refresh or not self.search_panel.isVisible():
+            return
+        if not self._auto_refresh_on_edit:
+            self._search_refresh_timer.stop()
+            self.search_panel.forget_results()
+            self._clear_match_highlights()
             return
         self._refresh_search_results()
 

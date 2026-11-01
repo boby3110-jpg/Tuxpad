@@ -35,10 +35,13 @@ NAS (CIFS) 上の Dropbox 同期フォルダのファイルを開いている最
 from __future__ import annotations
 
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QEvent
+import shiboken6
+from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QMessageBox
 
 from editor_app import file_watch
@@ -51,6 +54,34 @@ def sample(tmp_path: Path) -> Path:
     path = tmp_path / "共有メモ.txt"
     path.write_text("最初の内容\n", encoding="utf-8")
     return path
+
+
+def _poll_inline(work) -> None:
+    """見回りを、別スレッドを立てずにその場で走らせる（テスト用）。"""
+    work()
+
+
+@pytest.fixture(autouse=True)
+def poll_inline(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """このファイルのテストでは、既定で見回りを**その場で**走らせる。
+
+    製品では ``stat`` は別スレッドで走る（引き継ぎ ⑮）。そのままだと
+    「``_poll_network_files()`` を呼んだ直後に結果を見る」という、この
+    ファイルのほとんどのテストの書き方が使えない——かといって全件を
+    ``qtbot.waitUntil`` で書き換えると、見張りたいこと（気づくか・
+    ローカルを巻き込まないか・断られたら黙るか）がスレッドの待ち合わせに
+    埋もれてしまう。そこで**走らせる道だけ**を差し替える。
+
+    **本物のスレッドを通すテストは ``@pytest.mark.real_poll_thread`` を
+    付ける**こと（そちらだけはこの差し替えをしない）。
+    「別スレッドを使わずその場で ``stat`` する」という壊し方は、その
+    印を付けたテストが捕まえる（＝この差し替えで見張りが消えてはいない）。
+    """
+    if "real_poll_thread" in request.keywords:
+        return
+    monkeypatch.setattr(file_watch, "_poll_executor", _poll_inline)
 
 
 def _pretend_network(monkeypatch: pytest.MonkeyPatch, *paths: Path) -> None:
@@ -417,6 +448,34 @@ def test_polling_a_closed_window_does_not_ask(
     window._process_pending_reloads()
 
     assert messages == []
+
+
+def test_a_closed_window_does_not_even_stat(
+    window: MainWindow, sample: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """閉じた窓では **``stat`` もしない**（入口で止める。結果の側で捨てない）。
+
+    上のテストの対。確認が出ないことだけを見ていると、「入口の確認を
+    外しても、結果を受け取る側が捨てるので誰も気づかない」状態になる
+    （引き継ぎ ⑮ で確認が 2 か所になった）。**遅い共有フォルダへの
+    ``stat`` と別スレッドは、閉じた窓のために使ってはいけない**ので、
+    入口で止まっていること自体をここで縛る。
+    """
+    _pretend_network(monkeypatch, sample)
+    window.open_path(sample)
+    stat_ed: list[Path] = []
+    real = file_watch.file_signature
+
+    def counting_signature(path: Path):
+        stat_ed.append(path)
+        return real(path)
+
+    monkeypatch.setattr(file_watch, "file_signature", counting_signature)
+
+    window.close()
+    window._poll_network_files()
+
+    assert stat_ed == []
 
 
 def test_minimized_window_still_polls(
@@ -978,3 +1037,362 @@ def test_slow_poll_limit_is_a_noticeable_pause() -> None:
     固まりの中で見回りが占めていた分を見落とす。
     """
     assert 0.05 <= file_watch.SLOW_POLL_SECONDS <= 0.5
+
+
+# ----------------------------------------------------------------------
+# 見回りを画面とは別のスレッドで行う（引き継ぎ ⑮、2026-10-22）
+#
+# 実機（rclone の Google Drive）では ``stat`` 1 件が 300〜430ms、負荷の
+# かかった状態では**最悪 30 秒**かかっており、45 秒おきの見回りと最前面に
+# 出した瞬間の見回りが、そのまま「画面が 1〜3 秒固まる」症状になっていた
+# （見張り `diagnostics.py` が 1 時間 40 分で 92 回捕まえ、うち 77 回が
+# この見回り）。そこで ``stat`` を別スレッドへ出した。
+#
+# ここで見張るのは次の 4 つである。
+#
+# 1. **本当に別のスレッドで走るか**（＝画面が止まらないか）
+# 2. **見回りを重ねないか** — 返らない ``stat`` が 45 秒ごとに積み上がると、
+#    30 秒返らないスレッドが何本も生きることになる
+# 3. **戻ってくるまでに変わった状況を取り違えないか** — 閉じたウィンドウ・
+#    閉じたタブ・**その間に保存し直されたタブ**
+# 4. **アプリの終了を待たせないか**（daemon スレッドであること）
+# ----------------------------------------------------------------------
+class _DeferredPoll:
+    """見回りを溜めておき、好きなときに走らせる。
+
+    「``stat`` から結果が戻るまでの間に状況が変わった」場面を、本物の
+    スレッドの間合いに頼らず確実に作るための仕掛け。``run()`` を呼ぶまで
+    ``stat`` も結果の配達も起きないので、**その手前でタブを閉じたり
+    保存し直したり**できる。
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.jobs: list = []
+        monkeypatch.setattr(file_watch, "_poll_executor", self.jobs.append)
+
+    def run(self) -> None:
+        jobs, self.jobs = self.jobs, []
+        for job in jobs:
+            job()
+
+
+@pytest.mark.real_poll_thread
+def test_the_poll_stats_on_another_thread_and_still_finds_the_change(
+    qtbot, window: MainWindow, sample: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**本物のスレッド**で端から端まで通す（差し替えなし）。
+
+    見張るのは 2 つ。``stat`` が**画面のスレッドでは走っていない**こと
+    （これが引き継ぎ ⑮ の目的そのもの）と、それでも変更にちゃんと気づいて
+    今までと同じ道（``_pending_reload_paths``）へ合流すること。
+    """
+    window.open_path(sample)
+    _pretend_network(monkeypatch, sample)
+    threads: list[threading.Thread] = []
+    real = file_watch.file_signature
+
+    def recording_signature(path: Path):
+        threads.append(threading.current_thread())
+        return real(path)
+
+    monkeypatch.setattr(file_watch, "file_signature", recording_signature)
+    _rewrite(sample, "別のマシンが書き換えた内容\n")
+
+    window._poll_network_files()
+
+    qtbot.waitUntil(lambda: str(sample) in window._pending_reload_paths, timeout=5000)
+    assert threads, "stat が 1 回も走っていない"
+    assert threading.main_thread() not in threads, (
+        "stat が画面のスレッドで走っている（＝画面が止まる）"
+    )
+
+
+@pytest.mark.real_poll_thread
+def test_the_poll_returns_at_once_even_when_stat_is_slow(
+    qtbot,
+    window: MainWindow,
+    sample: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    diagnostics_log: list[str],
+) -> None:
+    """``stat`` が 1 秒かかっても、見回りの呼び出しは**すぐ戻る**。
+
+    実機の症状（45 秒おきに画面が 1〜3 秒止まる）を直接写したテスト。
+    ここが遅いままだと、タイマーから呼ばれた瞬間と最前面に出した瞬間に
+    画面が止まる。**戻ってきたあとに、ちゃんと変更が積まれること**まで
+    見る（速さと引き換えに気づけなくなっていないこと）。
+    """
+    window.open_path(sample)
+    _pretend_network(monkeypatch, sample)
+    real = file_watch.file_signature
+
+    def slow_signature(path: Path):
+        time.sleep(1.0)
+        return real(path)
+
+    monkeypatch.setattr(file_watch, "file_signature", slow_signature)
+    _rewrite(sample, "遅い共有フォルダのファイル\n")
+
+    started = time.perf_counter()
+    window._poll_network_files()
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.2, f"見回りの呼び出しで {elapsed:.2f} 秒止まった"
+    qtbot.waitUntil(lambda: str(sample) in window._pending_reload_paths, timeout=5000)
+
+
+@pytest.mark.real_poll_thread
+def test_polls_do_not_pile_up_while_one_is_still_running(
+    qtbot, window: MainWindow, sample: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """見回り中にまた呼ばれても、**新しい見回りは始めない**。
+
+    rclone/CIFS の ``stat`` は相手が応答しないと何十秒も返らないことが
+    あり（実機で 1 件 30 秒）、45 秒おきのタイマーと最前面化が重なると
+    返らないスレッドが積み上がる。**終わったあとは、また始められること**
+    まで見る（旗を下ろし忘れると外部変更に二度と気づかなくなる）。
+    """
+    window.open_path(sample)
+    _pretend_network(monkeypatch, sample)
+    release = threading.Event()
+    calls: list[Path] = []
+    real = file_watch.file_signature
+
+    def blocking_signature(path: Path):
+        calls.append(path)
+        release.wait(10)
+        return real(path)
+
+    monkeypatch.setattr(file_watch, "file_signature", blocking_signature)
+
+    window._poll_network_files()
+    qtbot.waitUntil(lambda: len(calls) == 1, timeout=5000)
+
+    window._poll_network_files()  # 45 秒のタイマーが来た
+    window._poll_network_files()  # 最前面に出した
+    assert len(calls) == 1, "返ってきていない見回りに重ねて stat している"
+
+    release.set()
+    qtbot.waitUntil(lambda: not window._network_poll_running, timeout=5000)
+
+    window._poll_network_files()
+    qtbot.waitUntil(lambda: len(calls) == 2, timeout=5000)
+    # 2 回目が終わるまで待ってから抜ける（ウィンドウが片付けられた後に
+    # 結果が届く形は、別のテストで見張っている）。
+    qtbot.waitUntil(lambda: not window._network_poll_running, timeout=5000)
+
+
+def test_a_result_for_a_closed_tab_is_thrown_away(
+    window: MainWindow, sample: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """見に行っている間にタブが閉じたら、その結果は捨てる。"""
+    window.open_path(sample)
+    _pretend_network(monkeypatch, sample)
+    deferred = _DeferredPoll(monkeypatch)
+
+    window._poll_network_files()
+    _rewrite(sample, "見に行っている間に書き換わった\n")
+    window.tabs.removeTab(0)
+
+    deferred.run()
+
+    assert window._pending_reload_paths == set()
+
+
+def test_handling_a_result_does_not_touch_the_slow_folder_again(
+    window: MainWindow, sample: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """結果を受け取る側は、**画面のスレッドでファイルシステムに触らない**。
+
+    見回りの ``stat`` を別スレッドへ出しても、結果を扱うところで遅い
+    フォルダに触っていては意味が無い。踏みやすいのは
+    :meth:`_find_editor_for_watched_path` で、**タブが見つからないと
+    ``resolve_path`` で探し直す**——これはパスの各階層への ``lstat`` で、
+    rclone では 1 回 300〜430ms かかる（＝引き継ぎ ⑮ で消したはずの
+    「固まり」がそのまま戻る）。見回りに渡しているパスは既に resolve
+    済みなので、探し直す必要は無い。
+
+    **タブが閉じている場合**を使うのが肝。開いたままだと最初の引きで
+    見つかってしまい、探し直しの道を 1 度も踏まない。
+    """
+    window.open_path(sample)
+    _pretend_network(monkeypatch, sample)
+    deferred = _DeferredPoll(monkeypatch)
+
+    window._poll_network_files()
+    window.tabs.removeTab(0)
+    deferred.run()  # ここで stat（別スレッド側の分）は済ませておく
+
+    # 片付いた後の結果を、もう一度同じ形で流し込む（数えるのはこちらだけ）。
+    counter = _StatCounter()
+    with monkeypatch.context() as patch:
+        counter.install(patch)
+        window._handle_network_poll_result([(str(sample), (1, 1), None)])
+
+    assert counter.count == 0
+
+
+def test_a_result_for_a_closed_window_is_thrown_away(
+    make_window, sample: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """見に行っている間にウィンドウが閉じたら、何も訊かない。
+
+    ``stat`` が 30 秒返らないことがある＝**閉じたあとに結果が届くのは
+    珍しい事故ではない**。既存の「閉じたウィンドウは見回らない」
+    (`test_polling_a_closed_window_does_not_ask`) の、結果が戻る側の対。
+    """
+    window = make_window()
+    window.open_path(sample)
+    _pretend_network(monkeypatch, sample)
+    deferred = _DeferredPoll(monkeypatch)
+    messages = _patch_prompt(monkeypatch, QMessageBox.StandardButton.Yes)
+
+    window._poll_network_files()
+    _rewrite(sample, "見に行っている間に書き換わった\n")
+    window.close()
+
+    deferred.run()
+
+    assert window._pending_reload_paths == set()
+    assert messages == []
+
+
+def test_a_result_from_before_the_tab_was_saved_is_thrown_away(
+    window: MainWindow, sample: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """見に行った**後に**そのタブが保存・読み直しをしたら、結果は古い。
+
+    捨てないと、自分の保存を外部変更と取り違える道ができる。最後には
+    :meth:`_maybe_reload_changed_file` が本文と見比べるので確認ダイアログ
+    までは出ないが、**ファイル全体の読み込みが無駄に走る＝また画面が
+    止まる**（しかも遅い共有フォルダのファイルで）。
+    """
+    editor = window.open_path(sample)
+    _pretend_network(monkeypatch, sample)
+    deferred = _DeferredPoll(monkeypatch)
+    # 見回りが持ち帰る札＝「見に行った時点のディスク」。タブが知っている
+    # 札とも、このあと保存される姿とも違う値にしておく。
+    monkeypatch.setattr(file_watch, "file_signature", lambda path: (1, 1))
+
+    window._poll_network_files()
+    # 見に行っている間に、このタブが保存し直した（札が進む）。
+    _rewrite(sample, "自分で保存し直した内容\n")
+    editor.remember_disk_state()
+
+    deferred.run()
+
+    assert window._pending_reload_paths == set()
+
+
+@pytest.mark.real_poll_thread
+def test_a_poll_in_flight_survives_the_window_being_torn_down(
+    sample: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """見回りの最中にウィンドウが片付けられても、別スレッドが例外で死なない。
+
+    ``stat`` が 30 秒返らないことがある以上、**その間にアプリを閉じられる
+    のは珍しい事故ではない**。結果の返し口はウィンドウの子なので一緒に
+    片付けられ、そこへ ``emit`` すると ``RuntimeError`` になる——別スレッド
+    の中で起きるので誰も受け取らず、「閉じるたびにスタックトレースが出る」
+    形で表に出る（pytest は拾った例外を警告にし、`pytest.ini` の
+    ``filterwarnings = error`` が赤にするので、このテストが見張りになる）。
+
+    ``make_window`` を使わずに ``MainWindow()`` を直に作るのは、自分から
+    片付けたいため（pytest-qt に登録したウィジェットを自分で消すと、
+    後始末の側が ``already deleted`` で落ちる）。
+    """
+    window = MainWindow()
+    window.show()
+    window.open_path(sample)
+    _pretend_network(monkeypatch, sample)
+    release = threading.Event()
+    entered = threading.Event()
+    threads: list[threading.Thread] = []
+    real = file_watch.file_signature
+
+    def blocking_signature(path: Path):
+        threads.append(threading.current_thread())
+        entered.set()
+        release.wait(10)
+        return real(path)
+
+    monkeypatch.setattr(file_watch, "file_signature", blocking_signature)
+
+    window._poll_network_files()
+    assert entered.wait(5), "別スレッドが stat に入らなかった"
+
+    window.close()
+    window.deleteLater()
+    # ``processEvents()` では ``DeferredDelete`` は流れない（この環境の癖は
+    # PROGRESS.md の「ルーティーンが毎回ハマるところ」にある）。
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert not shiboken6.isValid(window)
+
+    release.set()
+    threads[0].join(5)
+    assert not threads[0].is_alive(), "見回りのスレッドが終わらなかった"
+
+
+def test_a_result_arriving_after_qt_teardown_is_ignored(
+    sample: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Qt 側 (C++) が片付いた後に見回りの結果が届いても、落ちないこと。
+
+    ``test_poll_after_qt_teardown_is_ignored`` の、**結果が戻る側**の対。
+    ``stat`` は 30 秒返らないことがあるので、別スレッドが結果を持ち帰る
+    頃にはウィンドウの Qt 側が消えていることがある。そのまま
+    ``self.isHidden()`` へ触ると ``Internal C++ object (MainWindow)
+    already deleted`` の ``RuntimeError`` になる。
+
+    （Qt のシグナルは受け手が消えれば自分で切れるので、普段ここへは
+    来ない。それでも確かめておくのは、**この穴は「45 秒おきに例外が
+    出続ける」形でしか表に出ない**＝気づいたときには既に起きている
+    類のものだから。見回りの入口の側は実際に踏んだ形がある。）
+    """
+    window = MainWindow()
+    window.show()
+    _pretend_network(monkeypatch, sample)
+    editor = window.open_path(sample)
+    before = editor.disk_signature
+    messages = _patch_prompt(monkeypatch, QMessageBox.StandardButton.Yes)
+
+    window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert shiboken6.isValid(window) is False
+
+    # 例外が飛ばないことが見張りたいこと。
+    window._handle_network_poll_result([(str(sample), (1, 1), before)])
+
+    assert messages == []
+
+
+@pytest.mark.real_poll_thread
+def test_polling_runs_in_a_real_thread_by_default() -> None:
+    """既定の走らせ方は**別スレッド**であること。
+
+    このファイルの大半のテストは ``_poll_executor`` を「その場で走らせる」
+    形に差し替えている（`poll_inline`）。差し替えたままの値が製品の既定に
+    なってしまったら、**テストは全件緑のまま実機の画面が止まる**ので、
+    既定そのものをここで縛る。
+    """
+    assert file_watch._poll_executor is file_watch._run_poll_in_thread
+
+
+def test_the_poll_thread_does_not_hold_up_quitting() -> None:
+    """見回りのスレッドは daemon ＝ ``stat`` が返らなくてもアプリを閉じられる。
+
+    実機では 1 件の ``stat`` が 30 秒返らないことがある。daemon でないと、
+    その間に閉じようとしたアプリが**終わるまで消えない**。
+    """
+    seen: list[threading.Thread] = []
+    done = threading.Event()
+
+    def work() -> None:
+        seen.append(threading.current_thread())
+        done.set()
+
+    file_watch._run_poll_in_thread(work)
+
+    assert done.wait(5), "別スレッドが走らなかった"
+    assert seen[0] is not threading.main_thread()
+    assert seen[0].daemon is True

@@ -278,6 +278,52 @@ def test_releasing_restores_the_cursor(bar: MultiRowTabBar) -> None:
 
 
 # ----------------------------------------------------------------------
+# 離したあとの後片付け（押した場所の控えを消すこと）
+#
+# 同じ後片付けが 2 か所にある。:meth:`MultiRowTabBar._reset_mouse_state` と、
+# ``mouseReleaseEvent`` の中に書き写してある分（離したときはホバーの印だけは
+# 残すので、使い回せない）。**前者だけがテストで縛られていた**ので、
+# ここで後者も縛る。
+#
+# 控えが残ると、次に「タブの無い場所」を押したときが危ない。そこを押すと
+# ``mousePressEvent`` は ``QTabBar`` に渡して何も控えない（``tabAt()`` が
+# -1）ため、**前のクリックの控えがそのまま生き続ける**。その状態で左ボタンを
+# 押しながら動かすと、押してもいないタブが動いてしまう。
+# ----------------------------------------------------------------------
+def test_click_then_dragging_a_gap_does_not_reorder(bar: MultiRowTabBar) -> None:
+    """クリックの後、タブの無い場所を引っぱってもタブは並べ替わらない。"""
+    fill(bar, 3, prefix="後片付け")
+    moved: list[tuple[int, int]] = []
+    bar.tabMoveRequested.connect(lambda source, target: moved.append((source, target)))
+
+    press(bar, bar.tabRect(0).center())
+    release(bar, bar.tabRect(0).center())
+
+    press(bar, empty_spot(bar))
+    move(bar, bar.tabRect(2).center())
+
+    assert moved == []
+
+
+def test_click_then_dragging_a_gap_outside_does_not_tear_off(bar: MultiRowTabBar) -> None:
+    """同じ操作で、タブが別ウィンドウへ飛んでいかないこと（対の確認）。"""
+    fill(bar, 3, prefix="後片付け")
+    started: list[int] = []
+    bar.start_cross_window_drag = started.append
+
+    press(bar, bar.tabRect(0).center())
+    release(bar, bar.tabRect(0).center())
+
+    gap = empty_spot(bar)
+    press(bar, gap)
+    outside = QPoint(gap.x(), bar.rect().bottom() + QApplication.startDragDistance() + 5)
+    assert not bar.rect().contains(outside)
+    move(bar, outside)
+
+    assert started == []
+
+
+# ----------------------------------------------------------------------
 # ホバーの見た目
 # ----------------------------------------------------------------------
 def test_hovering_the_close_button_changes_the_look(bar: MultiRowTabBar) -> None:
@@ -732,3 +778,104 @@ def test_tab_bar_never_takes_the_keyboard_focus(bar: MultiRowTabBar) -> None:
     fill(bar, 3, prefix="フォーカス")
 
     assert bar.focusPolicy() == Qt.FocusPolicy.NoFocus
+
+
+# ----------------------------------------------------------------------
+# 1 つの `if` に歯止めが 2 つ重なっている所（86 回目）
+#
+# どちらの条件も、落としても 2288 件すべてが緑のまま通り抜けていた。
+# 「`and` でつないだ条件は operand ごとに落としてみる」の実例。
+# ----------------------------------------------------------------------
+def test_dragging_over_a_gap_does_not_break_the_reorder(bar: MultiRowTabBar) -> None:
+    """「タブの無い場所」を通り過ぎても、並べ替えが続けられること。
+
+    ``mouseMoveEvent`` の ``if target >= 0 and target != self._press_index:``
+    の ``target >= 0`` を落とすと、隙間の上では ``tabAt()`` が -1 を返すので
+    ``-1 != press_index`` が成り立ってしまい、
+
+    * ありもしない位置への ``tabMoveRequested(source, -1)`` が飛び、
+    * ``self._press_index`` が -1 に化けて、**そのドラッグは以後どこへ
+      運んでも並べ替わらなくなる**。
+
+    **折り返しタブバーでは段の端の隙間が普通に在る**ので、段をまたいで
+    タブを動かすと必ずここを通る（＝機能 5 の主役の操作が途中で死ぬ）。
+
+    この壊し方自体は
+    :func:`test_dragging_over_a_gap_shows_the_grab_cursor` が
+    **掴んだ形のカーソルが出ない**という横からの理由で既に捕まえていた。
+    ここで縛るのは「**並べ替えが続けられる**」という利用者側の結果の方で、
+    カーソルの見た目を変えたときに黙って外れないようにするためのもの。
+    """
+    fill(bar, 5, prefix="すきま")
+    moved: list[tuple[int, int]] = []
+    bar.tabMoveRequested.connect(lambda f, t: moved.append((f, t)))
+
+    press(bar, bar.tabRect(0).center())
+    move(bar, empty_spot(bar))
+
+    # 隙間の上では何も起きず、押したタブを見失わないこと。
+    assert moved == []
+    assert bar._press_index == 0
+
+    # 隙間を通り過ぎた後でも、タブの上へ戻せば並べ替えが効くこと。
+    move(bar, bar.tabRect(2).center())
+    assert moved == [(0, 2)]
+
+
+def test_right_click_on_the_close_box_does_not_close_the_tab(
+    bar: MultiRowTabBar,
+) -> None:
+    """× の上で**右ボタン**を押して離しても、タブは閉じないこと。
+
+    ``mouseReleaseEvent`` の
+    ``if button == Qt.MouseButton.LeftButton and press_on_close:`` から
+    **左ボタンの条件を落としても全件が緑のまま**だった（86 回目）。
+    ``mousePressEvent`` は ``_press_on_close`` を**ボタンの種類に関係なく**
+    立てるので、落とすと右クリックでも × が効いてしまう。
+
+    実害は、タブのメニューを出そうとして × の上で右クリックしただけで
+    **そのタブが閉じる**こと。未保存なら保存確認が割り込んでくる。
+    """
+    fill(bar, 3, prefix="右クリック")
+    requested: list[int] = []
+    bar.tabCloseRequested.connect(lambda index: requested.append(index))
+
+    center = bar.closeButtonRect(1).center()
+    press(bar, center, Qt.MouseButton.RightButton)
+    release(bar, center, Qt.MouseButton.RightButton)
+
+    assert requested == []
+    assert bar.count() == 3
+
+
+def test_releasing_on_the_close_box_after_pressing_the_label_does_not_close(
+    bar: MultiRowTabBar,
+) -> None:
+    """タブの名前の上で押して、× の上で離しただけでは閉じないこと。
+
+    同じ ``if`` のもう片方、**``press_on_close`` を落としても全件が緑のまま**
+    だった（86 回目）。落とすと「押した所がどこであれ、左ボタンを × の上で
+    離したら閉じる」になる。
+
+    ``_press_on_close`` は「**押した時点で × の上だったか**」の控えで、
+    閉じるのを「× を押して × で離した」ときだけに限るためにある
+    （ボタンの押し離しの作法どおり）。名前の上から × までは数 px しか
+    離れていないことがあり、ドラッグの敷居（10 px）に届かないので
+    ``_dragging`` も立たない——つまり**指が少し滑っただけでタブが閉じる**。
+    未保存なら保存確認が割り込む。
+    """
+    fill(bar, 3, prefix="滑り")
+    requested: list[int] = []
+    bar.tabCloseRequested.connect(lambda index: requested.append(index))
+
+    close_box = bar.closeButtonRect(1)
+    # × のすぐ左（まだ名前の側）で押して、× の上で離す。
+    start = QPoint(close_box.left() - 3, close_box.center().y())
+    assert bar.tabAt(start) == 1
+    assert not close_box.contains(start)
+
+    press(bar, start)
+    release(bar, close_box.center())
+
+    assert requested == []
+    assert bar.count() == 3

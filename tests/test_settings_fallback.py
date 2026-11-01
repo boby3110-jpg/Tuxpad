@@ -296,3 +296,35 @@ def test_whole_broken_settings_file_still_starts_a_window(broken_settings, make_
     assert editor.wrap_column() == DEFAULT_WRAP_COLUMN
     assert editor.font_family() == DEFAULT_FONT_FAMILY
     assert editor.font_size() == DEFAULT_FONT_SIZE
+
+
+# --- ホイールのスクロール量（2026-10-26 追加） ------------------------
+
+
+def test_non_numeric_wheel_scroll_lines_falls_back_to_default(broken_settings) -> None:
+    from editor_app.editor import WHEEL_SCROLL_LINES
+    from editor_app.settings import load_wheel_scroll_lines
+
+    broken_settings("[editor]\nwheel_scroll_lines=abc\n")
+    assert load_wheel_scroll_lines() == WHEEL_SCROLL_LINES
+
+
+@pytest.mark.parametrize("lines", ["0", "-2", "21"])
+def test_out_of_range_wheel_scroll_lines_falls_back_to_default(
+    broken_settings, lines: str
+) -> None:
+    """0 行だとホイールで動かなくなり、極端に大きいと 1 目盛りで飛びすぎる。"""
+    from editor_app.editor import MAX_WHEEL_SCROLL_LINES, WHEEL_SCROLL_LINES
+    from editor_app.settings import load_wheel_scroll_lines
+
+    assert MAX_WHEEL_SCROLL_LINES == 20  # "21" が範囲外であることの前提
+    broken_settings(f"[editor]\nwheel_scroll_lines={lines}\n")
+    assert load_wheel_scroll_lines() == WHEEL_SCROLL_LINES
+
+
+@pytest.mark.parametrize("lines", ["1", "20"])
+def test_wheel_scroll_lines_at_the_limits_are_kept(broken_settings, lines: str) -> None:
+    from editor_app.settings import load_wheel_scroll_lines
+
+    broken_settings(f"[editor]\nwheel_scroll_lines={lines}\n")
+    assert load_wheel_scroll_lines() == int(lines)

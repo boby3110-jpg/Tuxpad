@@ -93,7 +93,6 @@ def test_prompt_search_input_lines_cancelled_keeps_previous_value(
 # ----------------------------------------------------------------------
 def test_search_and_replace_inputs_have_same_width(window: MainWindow) -> None:
     panel = window.search_panel
-    panel.set_replace_mode(True)
     panel.resize(500, 200)
     panel.show()
     panel.updateGeometry()

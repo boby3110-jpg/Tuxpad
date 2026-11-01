@@ -30,6 +30,8 @@ from .editor import (
     DEFAULT_SHOW_LINE_BREAKS,
     DEFAULT_WRAP_COLUMN,
     DEFAULT_WRAP_MODE,
+    MAX_WHEEL_SCROLL_LINES,
+    WHEEL_SCROLL_LINES,
     WRAP_FIXED,
     WRAP_NONE,
     WRAP_WINDOW,
@@ -52,6 +54,7 @@ _MENU_BAR_VISIBLE_KEY = "appearance/menu_bar_visible"
 _SEARCH_INPUT_LINES_KEY = "search/input_visible_lines"
 _BEEP_ON_NO_MATCH_KEY = "search/beep_on_no_match"
 _CHECK_UPDATES_ON_STARTUP_KEY = "update/check_on_startup"
+_WHEEL_SCROLL_LINES_KEY = "editor/wheel_scroll_lines"
 
 #: 検索欄・置換欄の既定の表示行数（実機フィードバックにより、
 #: 元は 3 行だったものを 2 倍の 6 行にした上で、設定できるようにした）。
@@ -123,6 +126,24 @@ def save_wrap_settings(mode: str, column: int) -> None:
     settings = QSettings()
     settings.setValue(_WRAP_MODE_KEY, mode)
     settings.setValue(_WRAP_COLUMN_KEY, column)
+
+
+def load_wheel_scroll_lines() -> int:
+    """ホイール 1 ノッチで送る行数を読み込む。壊れた値・範囲外は既定値。"""
+    settings = QSettings()
+    try:
+        lines = int(settings.value(_WHEEL_SCROLL_LINES_KEY, WHEEL_SCROLL_LINES))
+    except (TypeError, ValueError):
+        lines = WHEEL_SCROLL_LINES
+    if not 1 <= lines <= MAX_WHEEL_SCROLL_LINES:
+        lines = WHEEL_SCROLL_LINES
+    return lines
+
+
+def save_wheel_scroll_lines(lines: int) -> None:
+    """ホイール 1 ノッチで送る行数を保存し、次回起動時に復元できるようにする。"""
+    settings = QSettings()
+    settings.setValue(_WHEEL_SCROLL_LINES_KEY, lines)
 
 
 def load_show_line_breaks() -> bool:

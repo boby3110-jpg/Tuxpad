@@ -119,11 +119,7 @@ def test_typing_after_a_fruitless_search_says_not_searched_yet(
 def test_reopening_without_a_selection_keeps_the_previous_query(
     window: MainWindow,
 ) -> None:
-    """本文で何も選ばずに Ctrl+F すると、前回の検索語がそのまま残る。
-
-    選択中の文字列を検索欄へ流し込むのは「選択がある」ときだけ。選択が
-    無いのに流し込むと **空文字で検索欄が上書きされ、前回の検索語が消える**。
-    """
+    """Ctrl+F で開き直すと、前回の検索語がそのまま残る（Enter で使える）。"""
     make_tabs(window, "foo foo\n")
     open_search(window, "foo")
     window.close_search_panel()
@@ -134,8 +130,8 @@ def test_reopening_without_a_selection_keeps_the_previous_query(
     assert window.search_panel.query() == "foo"
 
 
-def test_reopening_with_a_selection_replaces_the_query(window: MainWindow) -> None:
-    """選択があるときは、これまでどおりその文字列で検索欄を置き換える。"""
+def test_reopening_with_a_selection_still_keeps_the_query(window: MainWindow) -> None:
+    """選択があっても検索欄は置き換えない（2026-10-20 に流し込みを廃止）。"""
     make_tabs(window, "alpha bravo\n")
     open_search(window, "alpha")
     window.close_search_panel()
@@ -147,32 +143,7 @@ def test_reopening_with_a_selection_replaces_the_query(window: MainWindow) -> No
     editor.setTextCursor(cursor)
     window.show_search_panel()
 
-    assert window.search_panel.query() == "bravo"
-
-
-def test_multiline_selection_goes_into_the_search_box_as_newlines(
-    window: MainWindow,
-) -> None:
-    """複数行を選んで Ctrl+F すると、その複数行がそのまま検索語になる。
-
-    ``QTextCursor.selectedText()`` は改行を U+2029（段落区切り）で返すため、
-    :meth:`SearchPanel.set_initial_text` はこれを本文と同じ ``\\n`` に直して
-    から検索欄へ入れている。**この置換自体は二重の備え**で、外しても
-    ``QPlainTextEdit.setPlainText()`` が U+2029 を段落の切れ目として取り込む
-    ので結果は変わらない（35 回目に確認）。ここで固定しているのは中の
-    やり方ではなく、**選んだ範囲がそのまま検索語として通ること**。
-    """
-    make_tabs(window, "alpha\nbravo\ncharlie\n")
-    editor = window.current_editor()
-    cursor = editor.textCursor()
-    cursor.setPosition(0)
-    cursor.setPosition(len("alpha\nbravo"), QTextCursor.MoveMode.KeepAnchor)
-    editor.setTextCursor(cursor)
-
-    window.show_search_panel()
-
-    assert window.search_panel.query() == "alpha\nbravo"
-    assert len(window.search_panel.matches()) == 1
+    assert window.search_panel.query() == "alpha"
 
 
 # ----------------------------------------------------------------------

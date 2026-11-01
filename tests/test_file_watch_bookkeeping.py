@@ -267,3 +267,78 @@ def test_debounce_timer_stops_after_firing_once(
     window._reload_check_timer.setInterval(0)
     window._reload_check_timer.start()
     qtbot.waitUntil(lambda: window._reload_check_timer.isActive() is False, timeout=1000)
+
+
+# ----------------------------------------------------------------------
+# タブがウィンドウ間を移ったときの後片付け
+#
+# タブを閉じたとき (`MainWindow.close_editor`) と、ウィンドウ間で移したとき
+# (`tab_transfer.py`) は、**同じ後片付けが要る**（自分のタブに無くなった
+# ファイルの監視を解く）。閉じる側は `_refresh_file_watches()` を呼んで
+# いたが、**移す側は呼び忘れていた**（2026-10-29（85 回目）に発見）。
+#
+# 残っても「閉じたファイルの問いが出る」までは至らない
+# （`_on_watched_file_changed` が開いていないパスで手を引く安全網がある）。
+# 実害はその手前で、**自分のタブには無いファイルを見張り続ける**こと——
+# ネットワーク上のファイルなら 45 秒おきの見回り（引き継ぎ ⑭⑮）が、
+# そのウィンドウで次に開く・保存する・閉じるまで止まらない。
+# ----------------------------------------------------------------------
+def test_moving_a_tab_to_another_window_moves_the_watch(
+    window: MainWindow, make_window, sample: Path, tmp_path: Path
+) -> None:
+    """別のウィンドウへ移したら、監視も移る（元には残らない）。"""
+    other = tmp_path / "残るほう.txt"
+    other.write_text("残る\n", encoding="utf-8")
+    window.open_path(other)
+    editor = window.open_path(sample)
+    target = make_window()
+    assert str(sample) in window._file_watcher.files()
+
+    window._move_tab_to_window(editor, target)
+
+    assert str(sample) not in window._file_watcher.files()
+    assert str(sample) in target._file_watcher.files()
+    # 元のウィンドウに残したタブの監視は、巻き込まれて外れたりしない。
+    assert str(other) in window._file_watcher.files()
+
+
+def test_tearing_off_a_tab_moves_the_watch(
+    window: MainWindow, sample: Path, tmp_path: Path
+) -> None:
+    """新しいウィンドウへ切り離したときも同じ（対の確認）。"""
+    other = tmp_path / "残るほう.txt"
+    other.write_text("残る\n", encoding="utf-8")
+    window.open_path(other)
+    editor = window.open_path(sample)
+    assert str(sample) in window._file_watcher.files()
+
+    new_window = window._tear_off_tab_to_new_window(editor, window.pos())
+    assert new_window is not None
+
+    assert str(sample) not in window._file_watcher.files()
+    assert str(sample) in new_window._file_watcher.files()
+    assert str(other) in window._file_watcher.files()
+    new_window.close()
+
+
+def test_moving_the_last_network_tab_stops_the_polling_in_the_source(
+    window: MainWindow, make_window, sample: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ネットワーク上のタブを渡したら、元のウィンドウの見回りは止まる。
+
+    45 秒おきの ``stat`` は、見るべきタブが無ければ 1 回も走らせない
+    （`tests/test_network_file_polling.py` の方針）。渡したあとも回り
+    続けると、そのウィンドウは**もう持っていないファイル**のために
+    起き続ける。
+    """
+    monkeypatch.setattr(
+        MainWindow, "_is_network_path", lambda self, path: str(path) == str(sample)
+    )
+    editor = window.open_path(sample)
+    target = make_window()
+    assert window._network_poll_timer.isActive()
+
+    window._move_tab_to_window(editor, target)
+
+    assert not window._network_poll_timer.isActive()
+    assert target._network_poll_timer.isActive()

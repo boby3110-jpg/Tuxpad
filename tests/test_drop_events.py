@@ -38,7 +38,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
-from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QFont
+from PySide6.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QFont
 from PySide6.QtWidgets import QMessageBox
 
 from editor_app.main_window import MainWindow
@@ -469,14 +469,18 @@ def test_window_is_registered_as_a_drop_target(window: MainWindow) -> None:
 def test_editor_drops_rich_text_as_plain_text(window: MainWindow) -> None:
     """書式付きの内容を落としても、書式は持ち込まないこと。
 
-    ``setAcceptRichText(False)`` が外れると、ブラウザや表計算から貼った
-    （落とした）内容が**その場の書体・文字色ごと**入ってくる。このアプリは
-    プレーンテキストしか扱わないので、保存されるのは結局ただの文字だが、
-    画面上はフォント設定が効いていないように見え、配色によっては
-    **背景と同じ色の文字**になって読めなくなる。
+    書式を持ち込んでしまうと、ブラウザや表計算から貼った（落とした）内容が
+    **その場の書体・文字色ごと**入ってくる。このアプリはプレーンテキストしか
+    扱わないので、保存されるのは結局ただの文字だが、画面上はフォント設定が
+    効いていないように見え、配色によっては**背景と同じ色の文字**になって
+    読めなくなる。
+
+    ``QTextEdit`` だった頃は ``setAcceptRichText(False)`` がこれを止めて
+    いた（引き継ぎ ⑯ の前は、その設定が残っているかを見ていた）。
+    ``QPlainTextEdit`` は**そもそも書式を持てない**ので設定自体が無い。
+    設定の有無ではなく「落とした結果に書式が付いていないこと」を見る。
     """
     editor = window.current_editor()
-    assert editor.acceptRichText() is False
 
     editor.setPlainText("")
     mime = QMimeData()
@@ -490,3 +494,7 @@ def test_editor_drops_rich_text_as_plain_text(window: MainWindow) -> None:
     cursor = editor.textCursor()
     cursor.setPosition(1)
     assert cursor.charFormat().fontWeight() == QFont.Weight.Normal.value
+    # 色も持ち込まない（太字だけ見ていると、色付きのまま素通りする）。
+    assert not cursor.charFormat().foreground().color().isValid() or (
+        cursor.charFormat().foreground().color() != QColor("#ff0000")
+    )

@@ -249,6 +249,11 @@ class MainWindow(
         きた瞬間にも同じ確認を走らせる（ローカルのタブしか無ければ
         :meth:`~editor_app.file_watch.FileWatchMixin._poll_network_files`
         は ``stat`` を 1 回もせずに帰る）。
+
+        **``stat`` は別スレッドで走るので、ここで待たされることはない**
+        （引き継ぎ ⑮）。別スレッドにする前は、最前面に出した瞬間に
+        rclone 上のファイルを見に行って**画面が 1〜3 秒止まって**いた
+        （実機の最初の報告がこの症状）。
         """
         if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
             MainWindow._activation_counter += 1
@@ -332,7 +337,7 @@ class MainWindow(
 
         ``display_state_changed`` はこのアプリ独自のシグナルなので
         まとめて外してよいが、``textChanged`` は ``EditorWidget`` の
-        親クラス (``QTextEdit``) のシグナルなので、引数なしの
+        親クラス (``QPlainTextEdit``) のシグナルなので、引数なしの
         ``disconnect()`` で全部切ってしまわないようにする。
         """
         editor.display_state_changed.disconnect()

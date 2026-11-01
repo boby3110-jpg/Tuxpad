@@ -14,9 +14,17 @@ PySide6 6.12.0 + Python 3.11 の組み合わせは ``None`` の参照数を
 from __future__ import annotations
 
 import os
+import tempfile
 import uuid
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# 診断ログ（stall.log）の置き場を、テスト全体を通して一時フォルダへ向ける。
+# テストごとの差し替え（:func:`_isolated_diagnostics_log`）だけでは足りない:
+# 見回りの別スレッドは**テストが終わった後に**記録を書くことがあり、その時点で
+# テストごとの差し替えはもう元に戻っている（2026-10-26 に実際に、利用者の
+# ``~/.local/state/tuxpad/stall.log`` へテストの記録が混ざった）。
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="tuxpad-test-state-")
 
 import pytest  # noqa: E402
 import shiboken6  # noqa: E402
@@ -110,6 +118,21 @@ def _isolated_backup_cache(tmp_path, monkeypatch):
     環境変数なので、差し替えても本番と違う経路にはならない。
     """
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_diagnostics_log(tmp_path, monkeypatch):
+    """診断ログ（``editor_app.diagnostics``、``stall.log``）の置き場を一時
+    ディレクトリへ移す。
+
+    本番のままだと、「見回りが遅かった」ことを確かめるテストが、利用者本人の
+    ``~/.local/state/tuxpad/stall.log`` にテスト用ファイルの記録を書き足して
+    しまう（2026-10-26 に実際に「/tmp/pytest-…」の見回り記録が 7 行混ざって
+    いた）。固まり調査の記録を読んで原因を判断しているので、**混ざると
+    実機の記録と見分けが付かなくなる**。``XDG_STATE_HOME`` は本番の実装が
+    そのまま見る環境変数なので、差し替えても本番と違う経路にはならない。
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
 
 
 @pytest.fixture(autouse=True)

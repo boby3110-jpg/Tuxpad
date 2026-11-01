@@ -90,6 +90,40 @@ def test_encoding_choices_covers_the_documented_set() -> None:
         assert expected in choices
 
 
+def test_encoding_choices_are_offered_in_the_documented_order() -> None:
+    """選択肢が **UTF-8 系 → 日本語レガシー → UTF-16/32** の順に並ぶこと（83 回目）。
+
+    上の ``test_encoding_choices_covers_the_documented_set`` は**顔ぶれ**しか
+    見ておらず、他のテストはどれも ``fileio.SELECTABLE_ENCODINGS`` を
+    ``parametrize`` に渡すだけ（＝**並べ替えても全件緑**）だった。実測で、
+    ``ENCODING_DISPLAY_NAMES`` の先頭 3 つを入れ替えても 508 件すべてが
+    通り抜けた。
+
+    並び順は利用者が選ぶときの手数そのもので、**ほぼ常に使うのは先頭の
+    UTF-8 と、その次の Shift-JIS**（日本語の古いファイル）。ここが崩れると
+    「毎回一覧を目で探す」ことになる。``fileio.py`` の
+    :data:`~editor_app.fileio.SELECTABLE_ENCODINGS` の説明が約束している
+    順序でもある。
+
+    **定数を経由せずに直に書く**こと（80 回目の申し送り）——定数から
+    作ると、並べ替えたときに期待値も一緒に動いてしまい何も縛れない。
+    """
+    assert fileio.encoding_choices("utf-8") == [
+        # UTF-8 系（BOM 無しが既定なので先）
+        "utf-8",
+        "utf-8-sig",
+        # 日本語のレガシー（実際に出会う頻度の順）
+        "cp932",
+        "euc_jp",
+        "iso2022_jp",
+        # UTF-16/32（LE が先）
+        "utf-16-le",
+        "utf-16-be",
+        "utf-32-le",
+        "utf-32-be",
+    ]
+
+
 def test_encoding_choices_adds_unlisted_current() -> None:
     """一覧に無い文字コード（charset-normalizer 経由）でも初期選択にできること。"""
     choices = fileio.encoding_choices("gb18030")

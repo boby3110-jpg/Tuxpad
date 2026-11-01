@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor, QPalette, QTextCursor
 from PySide6.QtWidgets import (
     QGridLayout,
     QLabel,
+    QLayout,
     QPlainTextEdit,
     QPushButton,
     QWidget,
@@ -27,6 +28,29 @@ STALE_RESULT_NOTICE = "本文が変わったため検索し直しました"
 #: 検索はインクリメンタルサーチではなく明示的な操作（Enter / 「検索」ボタン）で
 #: 行うため、古い件数のまま黙って残さず「まだ検索していない」ことを伝える。
 PENDING_QUERY_NOTICE = "Enter か「検索」で検索"
+
+#: 件数欄の幅を決めるときの「いちばん長くなる件数表示」の見本。件数欄の幅は
+#: これと :data:`PENDING_QUERY_NOTICE` の広い方に**固定**し、それより長い
+#: 案内（:data:`STALE_RESULT_NOTICE` など）は欄の中で折り返す。
+#: 文字の長さに合わせて欄が伸び縮みすると、そのぶん入力欄が押し縮められて
+#: **検索結果が出るたびに入力欄の幅が変わっていた**（2026-10-25 実機
+#: フィードバック）。
+COUNT_LABEL_SAMPLE = "999999/999999 件"
+
+#: 入力欄の幅（全角何文字ぶんか）。最初は検索欄の案内文が丸ごと収まる幅
+#: （全角 30 文字強・パネル全体で約 611px）にしたが、「大きすぎるので
+#: 6 割くらいに」との実機フィードバック（2026-10-26）でこの幅にした。
+#: 案内文は短くし、キー操作の説明はツールチップへ移した。
+INPUT_WIDTH_CHARS = 13
+
+#: 入力欄の幅に足す余白 (px)。枠・内側の余白・縦スクロールバーのぶん。
+INPUT_WIDTH_PADDING = 32
+
+#: 検索欄・置換欄の案内文（空のときに薄く出る）と、マウスを乗せると出る説明。
+SEARCH_PLACEHOLDER = "検索語（Enter=検索/次へ）"
+SEARCH_TOOLTIP = "Enter=検索/次へ　Shift+Enter=前へ　Ctrl+Enter=改行（複数行検索）"
+REPLACE_PLACEHOLDER = "置換後の文字列"
+REPLACE_TOOLTIP = "Enter=1 件置換　Ctrl+Enter または Shift+Enter=改行"
 
 #: 検索欄・置換欄の配色（実機フィードバックにより追加）。ダークテーマだと
 #: 背景が暗く選択ハイライトも見えづらいとの指摘があったため、アプリの
@@ -181,9 +205,8 @@ class SearchPanel(QWidget):
         self._visible_lines = load_search_input_lines()
 
         self._input = _QueryTextEdit(self)
-        self._input.setPlaceholderText(
-            "検索... (Enter=検索/次へ Shift+Enter=前へ Ctrl+Enterで改行=複数行検索)"
-        )
+        self._input.setPlaceholderText(SEARCH_PLACEHOLDER)
+        self._input.setToolTip(SEARCH_TOOLTIP)
         self._input.setTabChangesFocus(True)
         self._input.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._set_input_height(self._visible_lines)
@@ -201,8 +224,16 @@ class SearchPanel(QWidget):
         self._search_button.clicked.connect(self._search_or_go_to_next_match)
 
         self._count_label = QLabel(self)
-        self._count_label.setMinimumWidth(80)
         self._count_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        # 幅は固定し、長い案内は折り返す（:data:`COUNT_LABEL_SAMPLE` 参照）。
+        metrics = self._count_label.fontMetrics()
+        self._count_label.setFixedWidth(
+            max(
+                metrics.horizontalAdvance(COUNT_LABEL_SAMPLE),
+                metrics.horizontalAdvance(PENDING_QUERY_NOTICE),
+            )
+        )
+        self._count_label.setWordWrap(True)
 
         # 検索欄を閉じる × ボタンは置いていない（実機フィードバックにより
         # 削除）。Esc キー、またはフローティングウィンドウ自身のタイトルバーの
@@ -211,9 +242,8 @@ class SearchPanel(QWidget):
         # 置換欄 (機能 7)。Ctrl+H で開いたときだけ見せる。検索欄と同じ
         # _QueryTextEdit を使うので、置換後の文字列にも改行を入れられる。
         self._replace_input = _QueryTextEdit(self)
-        self._replace_input.setPlaceholderText(
-            "置換後の文字列... (Ctrl+Enterで改行)"
-        )
+        self._replace_input.setPlaceholderText(REPLACE_PLACEHOLDER)
+        self._replace_input.setToolTip(REPLACE_TOOLTIP)
         self._replace_input.setTabChangesFocus(True)
         self._replace_input.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._set_input_height(self._visible_lines, target=self._replace_input)
@@ -243,16 +273,25 @@ class SearchPanel(QWidget):
         grid.addWidget(self._replace_button, 1, 1, top)
         grid.addWidget(self._replace_all_button, 1, 2, top)
         grid.setColumnStretch(0, 1)
-
-        # 置換行は Ctrl+H で置換モードにしたときだけ見せる。行の 3 つの
-        # ウィジェットをまとめて出し入れする（全部隠せば行は潰れて高さ 0 になる）。
-        self._replace_widgets = (
-            self._replace_input,
-            self._replace_button,
-            self._replace_all_button,
+        # **パネルの大きさは中身に合わせて固定する**（マウスで変えられず、
+        # 最大化もできない。2026-10-25 実機フィードバック）。最小と最大が
+        # 同じになるので、Wayland でもウィンドウマネージャー（KWin）が
+        # 最大化・リサイズを受け付けない。表示行数の設定を変えたときは、
+        # レイアウトが新しい高さで固定し直す。
+        #
+        # 固定した大きさが中身の文字で変わらないよう、入力欄の幅も固定する
+        # （全角 :data:`INPUT_WIDTH_CHARS` 文字ぶん）。件数欄の幅も固定してある。
+        grid.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
+        input_width = (
+            self._input.fontMetrics().horizontalAdvance("あ" * INPUT_WIDTH_CHARS)
+            + INPUT_WIDTH_PADDING
         )
-        for widget in self._replace_widgets:
-            widget.hide()
+        self._input.setFixedWidth(input_width)
+        self._replace_input.setFixedWidth(input_width)
+        # 置換行は常に見せる（Ctrl+F でも Ctrl+H でも同じパネル）。以前は
+        # Ctrl+F では隠していたが、Ctrl+H のあとに Ctrl+F すると、置換行の
+        # ぶん縦に伸びたウィンドウのまま中身だけ検索用になり、下が空いて
+        # 気持ちが悪かった（2026-10-20 実機フィードバック）。
 
         self._update_count_label()
         self._update_replace_buttons_enabled()
@@ -294,19 +333,6 @@ class SearchPanel(QWidget):
             cursor.select(QTextCursor.SelectionType.Document)
             self._input.setTextCursor(cursor)
 
-    def set_initial_text(self, text: str) -> None:
-        """パネルを開いたときに、選択中の文字列などを検索欄へ流し込む。
-
-        ``QTextCursor.selectedText()`` は改行を U+2029 (段落区切り) で返す
-        ため、複数行選択でもそのまま検索できるように ``\\n`` へ変換する。
-        """
-        if not text:
-            return
-        self._input.setPlainText(text.replace(" ", "\n"))
-        cursor = self._input.textCursor()
-        cursor.select(QTextCursor.SelectionType.Document)
-        self._input.setTextCursor(cursor)
-
     def query(self) -> str:
         return document_text(self._input)
 
@@ -333,14 +359,6 @@ class SearchPanel(QWidget):
         if not self.is_query_pending():
             return
         self.search_requested.emit(self.query())
-
-    def set_replace_mode(self, enabled: bool) -> None:
-        """置換欄・置換ボタンを表示するかどうかを切り替える（Ctrl+F / Ctrl+H の違い）。"""
-        for widget in self._replace_widgets:
-            widget.setVisible(enabled)
-
-    def is_replace_mode(self) -> bool:
-        return self._replace_input.isVisible()
 
     def replace_text(self) -> str:
         return document_text(self._replace_input)
@@ -374,6 +392,18 @@ class SearchPanel(QWidget):
         self._matches = matches
         self._current_match_index = -1
         self._searched_query = self.query() if query is None else query
+        self._update_count_label()
+        self._update_replace_buttons_enabled()
+
+    def forget_results(self) -> None:
+        """検索結果を捨て、「まだ検索していない」状態に戻す。
+
+        検索欄の語はそのまま残す（Enter を押せばその語で検索し直せる）。
+        件数欄は、語が入っていれば「まだ検索していない」旨の案内になる。
+        """
+        self._matches = []
+        self._current_match_index = -1
+        self._searched_query = None
         self._update_count_label()
         self._update_replace_buttons_enabled()
 

@@ -41,7 +41,11 @@ Linux の cifs クライアントが inotify へ流さない）。そこで**自
   (b) **ネットワーク上のタブにしか** ``stat`` せず、
   (c) **ローカルのタブしか開いていなければタイマーごと止まる**
   （＝ ``stat`` は 1 回も走らない）形にしてある。
-  見張りは `tests/test_network_file_polling.py`。
+  さらに (d) その ``stat`` は**画面とは別のスレッド**で走らせ、画面側は
+  結果を受け取って比べるだけにしてある（引き継ぎ ⑮）。実機では rclone
+  (Google Drive) 上の ``stat`` が 1 件 300〜430ms、負荷時は最悪 30 秒
+  かかっており、別スレッドにする前は見回りがそのまま「画面が 1〜3 秒
+  固まる」症状になっていた。見張りは `tests/test_network_file_polling.py`。
 - 既に閉じたファイルの通知が遅れて届くことがある。開いているかどうかを
   必ず確かめてから扱うこと。
 - **デバウンスの待ち時間のあいだにウィンドウが閉じられる**ことがある。
@@ -57,14 +61,16 @@ Linux の cifs クライアントが inotify へ流さない）。そこで**自
 
 from __future__ import annotations
 
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 # shiboken6 は PySide6 の土台（バインディングの実体）で、``PySide6.QtCore`` を
 # import した時点で必ず一緒に読み込まれる。新しい依存ではないので
 # requirements.txt に足す必要は無い（配布元の PySide6 でも同じ）。
 import shiboken6
-from PySide6.QtCore import QFileSystemWatcher, QTimer
+from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 from PySide6.QtWidgets import QMessageBox
 
 from .diagnostics import log_diagnostic
@@ -74,12 +80,34 @@ from .fileio import file_signature, read_text_file_detail, resolve_path
 
 #: 見回り 1 回（:meth:`FileWatchMixin._poll_network_files`）にこれ以上
 #: かかったら、どのファイルで何ミリ秒かを診断ログに残す（秒）。
-#: 見回りは画面の処理の中で走るので、ここが遅いとそのまま「固まり」になる
-#: （2026-10-20、最前面に出すと 1 秒固まるという実機報告の切り分け用）。
+#:
+#: 見回りの ``stat`` は**別スレッド**で走るようになった（引き継ぎ ⑮）ので、
+#: ここが遅くても画面は止まらない。それでも記録は残し続ける——実機では
+#: rclone 上の ``stat`` が 1 件 30 秒かかることがあり、**「外部変更に
+#: 気づくのが何十秒も遅れている」こと自体**は知っておきたい
+#: （記録の文面は利用者の手元の `stall.log` と見比べるため変えないこと）。
 SLOW_POLL_SECONDS = 0.1
 
 #: 見回りの所要時間を測る時計。テストから差し替えられるように変数にしてある。
 _poll_clock = time.perf_counter
+
+
+def _run_poll_in_thread(work: Callable[[], None]) -> None:
+    """見回りの ``stat`` を、画面とは別のスレッドで走らせる（引き継ぎ ⑮）。
+
+    ``daemon=True`` なのが肝。rclone/CIFS の ``stat`` は相手が応答しないと
+    何十秒も返らないことがあり（実機で 1 件 30 秒を観測）、終了を待たせると
+    **アプリが閉じられなくなる**。
+    """
+    threading.Thread(target=work, name="tuxpad-network-poll", daemon=True).start()
+
+
+#: 見回りの ``stat`` を実際に走らせる道。**テストから差し替えられるように
+#: 変数にしてある**（その場で走らせる形に差し替えると、スレッドの終わりを
+#: 待たずに結果を見られる）。差し替えるのはテストの都合であって、
+#: 製品では必ず別スレッドで走る——それを見張るテストが
+#: `tests/test_network_file_polling.py` に（本物のスレッドを通す形で）ある。
+_poll_executor: Callable[[Callable[[], None]], None] = _run_poll_in_thread
 
 #: 開いているファイルが外部で変わってから、再読み込みの確認を出すまでの
 #: 待ち時間 (ms)。連続した書き込みや temp→rename 方式の保存を 1 回に
@@ -231,6 +259,18 @@ def path_is_on_network_mount(path: Path | str) -> bool:
     return False
 
 
+class _NetworkPollSignals(QObject):
+    """見回り（別スレッド）の結果を画面のスレッドへ渡すための入れ物（引き継ぎ ⑮）。
+
+    ワーカースレッドから ``emit`` すると、受け手（画面のスレッドにいる
+    ウィンドウ）には Qt がキューイングして届けてくれる。
+    **ウィジェットやタブを直接触るコードをワーカースレッドに書かないこと**
+    （`update_check.py` の ``_UpdateCheckSignals`` と同じ作り）。
+    """
+
+    finished = Signal(object)  # [(パス, 見に行った札, 見に行く前の札), ...]
+
+
 class FileWatchMixin:
     """開いているファイルの外部変更を監視して再読み込みを提案する。"""
 
@@ -261,6 +301,14 @@ class FileWatchMixin:
         self._network_poll_timer = QTimer(self)
         self._network_poll_timer.setInterval(NETWORK_POLL_INTERVAL_MS)
         self._network_poll_timer.timeout.connect(self._poll_network_files)
+        #: 見回りの結果を別スレッドから受け取る口（引き継ぎ ⑮）。
+        self._network_poll_signals = _NetworkPollSignals(self)
+        self._network_poll_signals.finished.connect(self._handle_network_poll_result)
+        #: 見回り（別スレッド）が走っている間は True。**立っている間は
+        #: 新しい見回りを始めない**（引き継ぎ ⑮）。rclone や CIFS の
+        #: ``stat`` は相手が応答しないと何十秒も返らないことがあるので、
+        #: 重ねると 45 秒ごとにスレッドが積み上がってしまう。
+        self._network_poll_running = False
         #: 利用者が「再読み込みしますか？」に「いいえ」と答えたときの、
         #: そのときのディスクの見分け札（パス → 札）。
         #:
@@ -366,6 +414,14 @@ class FileWatchMixin:
         :attr:`_reload_check_timer` を起こすだけ——つまり **inotify が
         届いたときとまったく同じ道**を通る（確認ダイアログも、未保存の
         タブでの差分の見せ方も、新しくは作らない）。
+
+        **``stat`` そのものは別スレッドで走る**（引き継ぎ ⑮）。ここは
+        「見に行く先の一覧を作って別スレッドへ渡す」までで**すぐ戻る**ので、
+        相手のファイルシステムがどれだけ遅くても画面は止まらない。結果は
+        :meth:`_handle_network_poll_result` が画面のスレッドで受け取る。
+        実機（rclone の Google Drive）では ``stat`` 1 件が 300〜430ms、
+        負荷のかかった状態では**最悪 30 秒**かかっており、これが
+        45 秒おきと最前面化のたびに画面を 1〜3 秒止めていた。
         """
         # Qt 側 (C++) が既に片付けられた後に発火することがある
         # （:meth:`_process_pending_reloads` と同じ理由）。
@@ -386,24 +442,113 @@ class FileWatchMixin:
         # 次の発火でまた来るので、ここで諦めてよい。
         if self._long_operation_active:
             return
-        found = False
-        started = _poll_clock()
-        timings: list[tuple[float, Path]] = []
+        # 前の見回りがまだ終わっていなければ、新しくは始めない（引き継ぎ ⑮）。
+        # rclone/CIFS の ``stat`` は相手が応答しないと何十秒も返らないことが
+        # あり（実機で 1 件 30 秒を観測）、重ねると**45 秒ごとに返らない
+        # スレッドが積み上がる**。見送っても次の発火でまた来る。
+        if self._network_poll_running:
+            return
+        # **見に行く先の一覧は画面のスレッドで作る。** 別スレッドからは
+        # タブにもウィンドウにも一切触らないので、必要なもの（パスと、
+        # そのタブが今知っているディスクの札）はここで全部取り出しておく。
+        targets: list[tuple[str, Path, tuple[int, int] | None]] = []
         for editor in self.editors():
             path = editor.path
             if path is None or not self._is_network_path(path):
                 continue
-            stat_started = _poll_clock()
-            signature = file_signature(path)
-            timings.append((_poll_clock() - stat_started, path))
+            targets.append((str(path), path, editor.disk_signature))
+        if not targets:
+            # ネットワーク上のタブが無いなら ``stat`` もスレッドも 0 回
+            # （ローカルだけで使っている利用者に負担を増やさない）。
+            return
+        self._network_poll_running = True
+        signals = self._network_poll_signals
+        # **``self`` を閉じ込めない。** 別スレッドが握るのは「見に行く先の
+        # 一覧」「結果の返し口」「記録の関数」だけで、ウィンドウもタブも
+        # 手の届かない所に置く（静的メソッドなので取り出せば素の関数）。
+        report_slow_poll = self._report_slow_poll
+
+        def work() -> None:
+            """別スレッド側。``stat`` して結果を返すだけ（Qt には触らない）。"""
+            results: list[tuple[str, tuple[int, int] | None, tuple[int, int] | None]]
+            results = []
+            timings: list[tuple[float, Path]] = []
+            started = _poll_clock()
+            try:
+                for key, path, before in targets:
+                    stat_started = _poll_clock()
+                    signature = file_signature(path)
+                    timings.append((_poll_clock() - stat_started, path))
+                    results.append((key, signature, before))
+                report_slow_poll(_poll_clock() - started, timings)
+            finally:
+                # **何があっても結果を返す。** 返さないと
+                # :attr:`_network_poll_running` が立ったままになり、
+                # 見回りが二度と走らなくなる（＝外部変更に気づかなくなる）。
+                #
+                # ただし、**返し口そのものが消えていることがある**。
+                # ``stat`` は 30 秒返らないことがあり、その間に利用者が
+                # ウィンドウを閉じれば（＝アプリを終う途中なら）、親子で
+                # 付いているこの入れ物も Qt 側 (C++) から片付けられる。
+                # 消えた入れ物へ ``emit`` すると ``RuntimeError`` になり、
+                # 別スレッドの中なので誰も受け取らないまま
+                # 「終了のたびにスタックトレースが出る」形で表に出る。
+                try:
+                    signals.finished.emit(results)
+                except RuntimeError:
+                    # 片付けられた後。受け取る相手がもういないので、
+                    # 結果ごと捨ててよい（旗を下ろす相手もいない）。
+                    pass
+
+        _poll_executor(work)
+
+    def _handle_network_poll_result(
+        self,
+        results: list[tuple[str, tuple[int, int] | None, tuple[int, int] | None]],
+    ) -> None:
+        """見回り（別スレッド）の結果を受け取って、既存の道へ流す（引き継ぎ ⑮）。
+
+        ここは画面のスレッド。**``stat`` に何十秒かかっていた可能性がある**
+        ので、その間に状況が変わっていることを前提にする:
+
+        - ウィンドウが閉じた・片付けられた → 何もしない
+        - タブが閉じた（または別のウィンドウへ移った）→ その結果は捨てる
+        - **見に行った後にそのタブが保存・読み直しされた** → その結果は
+          古いので捨てる。捨てないと「自分の保存を外部変更と取り違えて、
+          ファイルを丸ごと読み直す（＝画面が止まる）」道ができる。
+        """
+        # 旗はいちばん先に下ろす（下の早期 return で下ろし忘れると、
+        # 見回りが二度と走らなくなる）。
+        self._network_poll_running = False
+        if not shiboken6.isValid(self):
+            return
+        if self.isHidden():
+            return
+        found = False
+        for key, signature, before in results:
+            # **:meth:`_find_editor_for_watched_path` は使わない。** あちらは
+            # 見つからなかったときに :func:`~editor_app.fileio.resolve_path`
+            # で探し直すが、それはパスの各階層への ``lstat`` ＝ここ（画面の
+            # スレッド）で遅い共有フォルダに触ることになり、**別スレッドへ
+            # 出した意味が無くなる**。見回りに渡したパスは
+            # ``str(editor.path)`` ＝既に resolve 済みなので、そのまま
+            # 引いて見つからなければタブが無い（閉じた・別の窓へ移った・
+            # 「名前を付けて保存」で別のパスになった）と判断してよい。
+            editor = self.find_editor_by_path(Path(key))
+            if editor is None or editor.path is None:
+                # 見に行っている間にタブが閉じた／別の窓へ移った。
+                continue
+            if editor.disk_signature != before:
+                # 見に行っている間に、このタブが保存・読み直しをした。
+                # 手元の結果はその前の姿なので、古くて使えない。
+                continue
             if signature == editor.disk_signature:
                 continue
-            if signature == self._declined_reload_signatures.get(str(path)):
+            if signature == self._declined_reload_signatures.get(key):
                 # この状態での再読み込みは、利用者が既に断っている。
                 continue
-            self._pending_reload_paths.add(str(path))
+            self._pending_reload_paths.add(key)
             found = True
-        self._report_slow_poll(_poll_clock() - started, timings)
         if found:
             self._reload_check_timer.start()
 

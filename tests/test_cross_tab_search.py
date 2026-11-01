@@ -185,8 +185,16 @@ def test_show_search_panel_makes_panel_visible_and_updates_count(
     assert window.search_panel._count_label.text() == "1 件"
 
 
-def test_show_search_panel_prefills_selected_text(window: MainWindow) -> None:
+def test_show_search_panel_does_not_prefill_the_selection(window: MainWindow) -> None:
+    """選択中の文字列は検索欄へ流し込まない（2026-10-20、利用者の判断で廃止）。
+
+    選んでから Ctrl+F → Ctrl+V で「検索欄に貼る」つもりの操作で、選択を
+    検索語にされると、前回の語が消えるうえに検索の手間が増える。
+    """
     make_tabs(window, "選択される文字列\n")
+    window.show_search_panel()
+    set_query(window, "前回の語")
+    window.close_search_panel()
     editor = window.current_editor()
     cursor = editor.textCursor()
     cursor.setPosition(0)
@@ -195,20 +203,8 @@ def test_show_search_panel_prefills_selected_text(window: MainWindow) -> None:
 
     window.show_search_panel()
 
-    assert window.search_panel.query() == "選択される"
-
-
-def test_show_search_panel_prefills_multiline_selection(window: MainWindow) -> None:
-    make_tabs(window, "1行目\n2行目\n3行目\n")
-    editor = window.current_editor()
-    cursor = editor.textCursor()
-    cursor.setPosition(0)
-    cursor.setPosition(len("1行目\n2行目"), QTextCursor.MoveMode.KeepAnchor)
-    editor.setTextCursor(cursor)
-
-    window.show_search_panel()
-
-    assert window.search_panel.query() == "1行目\n2行目"
+    assert window.search_panel.query() == "前回の語"
+    assert editor.textCursor().selectedText() == "選択される", "本文の選択も触らない"
 
 
 def test_close_search_panel_hides_panel_and_refocuses_editor(

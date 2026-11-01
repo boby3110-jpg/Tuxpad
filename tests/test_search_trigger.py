@@ -233,7 +233,8 @@ def test_enter_after_changing_the_query_searches_again(
 
 def test_searched_query_tracks_the_last_executed_search(window: MainWindow) -> None:
     window.show_search_panel()
-    assert window.search_panel.searched_query() == ""  # 開いた時点で 1 回だけ検索
+    # 選択せずに開いただけでは検索しない（tests/test_search_panel_open.py）。
+    assert window.search_panel.searched_query() is None
 
     type_query(window, "foo")
     assert window.search_panel.is_query_pending()

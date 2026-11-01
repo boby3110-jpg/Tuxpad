@@ -151,6 +151,43 @@ def test_selection_is_not_shifted_by_earlier_emoji(window: MainWindow) -> None:
     assert editor.textCursor().selectedText() == "🍣"
 
 
+def test_save_centers_the_unencodable_character_in_viewport(
+    window: MainWindow, tmp_path: Path, captured_message
+) -> None:
+    """選んだ文字が、ビューポートの端に埋もれないこと。
+
+    選択するだけでは足りない。``ensureCursorVisible()`` は最小限しか
+    スクロールしないので、長いファイルの後ろの方にある文字へ飛ぶと
+    **画面の一番下ぎりぎり**に来る。保存できない文字を直すのは
+    「その 1 文字を見つけて打ち直す」作業なので、端に出されると前後の
+    文脈が見えず、何を直せばよいのか分かりにくい。
+
+    同じ配慮は検索のジャンプにもあり（``center_cursor_vertically()`` を
+    検索と共用している。
+    ``test_cross_tab_search.py::test_jump_to_match_centers_cursor_in_viewport``）、
+    **検索側だけがテストで縛られていた**。こちらの経路
+    （:meth:`~editor_app.file_commands.FileCommandsMixin._select_text_range`）
+    からも中央寄せが外れないように縛る。
+    """
+    window.resize(500, 500)
+    window.show()
+
+    lines = [f"{i}行目の本文です\n" for i in range(300)]
+    lines[250] = "ここに♡がある\n"
+    path = make_sjis_file(tmp_path / "長い.txt", "本文\n")
+    editor = window.open_path(path)
+    edit_text(editor, "".join(lines))
+
+    assert window.save_editor(editor) is False
+    assert editor.textCursor().selectedText() == "♡"
+
+    viewport_height = editor.viewport().height()
+    cursor_y = editor.cursorRect().center().y()
+    # 完全な中央でなくてもよいが、端（上下 20% の帯）には来ないこと。
+    margin = viewport_height * 0.2
+    assert margin < cursor_y < viewport_height - margin
+
+
 def test_save_switches_to_the_tab_that_cannot_be_saved(
     window: MainWindow, tmp_path: Path, captured_message
 ) -> None:

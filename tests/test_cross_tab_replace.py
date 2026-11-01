@@ -185,21 +185,40 @@ def test_replace_action_shortcut_is_ctrl_h(window: MainWindow) -> None:
     assert window.action_replace.shortcut().toString() == "Ctrl+H"
 
 
+def _replace_row_visible(window: MainWindow) -> bool:
+    panel = window.search_panel
+    return all(
+        widget.isVisible()
+        for widget in (panel._replace_input, panel._replace_button, panel._replace_all_button)
+    )
+
+
 def test_show_replace_panel_shows_replace_row(window: MainWindow) -> None:
     make_tabs(window, "本文\n")
     window.show_replace_panel()
-    assert window.search_panel.is_replace_mode()
-    assert window.search_panel._replace_input.isVisible()
-    assert window.search_panel._replace_button.isVisible()
+    assert _replace_row_visible(window)
 
 
-def test_show_search_panel_hides_replace_row(window: MainWindow) -> None:
+def test_show_search_panel_shows_replace_row_too(window: MainWindow) -> None:
+    """Ctrl+F でも置換行を出す（2026-10-20 実機フィードバック）。
+
+    Ctrl+F では隠していた頃は、Ctrl+H のあとに Ctrl+F すると置換用の
+    大きさのまま中身だけ検索用になり、下が空いて気持ちが悪かった。
+    """
+    make_tabs(window, "本文\n")
+    window.show_search_panel()
+    assert _replace_row_visible(window)
+
+
+def test_ctrl_f_after_ctrl_h_keeps_the_same_panel(window: MainWindow) -> None:
     make_tabs(window, "本文\n")
     window.show_replace_panel()
+    size = window.search_panel.size()
+
     window.show_search_panel()
-    assert not window.search_panel.is_replace_mode()
-    assert not window.search_panel._replace_input.isVisible()
-    assert not window.search_panel._replace_button.isVisible()
+
+    assert _replace_row_visible(window)
+    assert window.search_panel.size() == size
 
 
 def test_replace_buttons_disabled_without_matches(window: MainWindow) -> None:
@@ -227,7 +246,6 @@ def test_panel_replace_input_enter_emits_replace_one_requested(
     window: MainWindow, qtbot
 ) -> None:
     panel = window.search_panel
-    panel.set_replace_mode(True)
 
     received = []
     panel.replace_one_requested.connect(lambda: received.append(True))
@@ -242,7 +260,6 @@ def test_panel_replace_input_shift_enter_inserts_newline(
     window: MainWindow, qtbot
 ) -> None:
     panel = window.search_panel
-    panel.set_replace_mode(True)
     panel._replace_input.setFocus()
 
     received = []

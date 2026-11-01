@@ -206,6 +206,16 @@ def _create_view_actions(window: "MainWindow") -> None:
     window.action_font.setStatusTip("本文のフォントとサイズを変更します")
     window.action_font.triggered.connect(window._prompt_font)
 
+    # ホイールのスクロール量（2026-10-26 実機フィードバックにより追加）。
+    # アプリ全体で共有し、QSettings に保存する。
+    window.action_wheel_scroll_lines = QAction("ホイールのスクロール量(&W)...", window)
+    window.action_wheel_scroll_lines.setStatusTip(
+        "マウスホイール 1 目盛りで本文を動かす行数を変更します"
+    )
+    window.action_wheel_scroll_lines.triggered.connect(
+        window._prompt_wheel_scroll_lines
+    )
+
     # アプリ全体のテーマ（実機フィードバックにより追加）。QApplication
     # 単位の設定なので、切り替えるとすべてのウィンドウに即座に反映される。
     window.action_theme_light = QAction("ライト(&L)", window, checkable=True)
@@ -383,6 +393,7 @@ def create_menus(window: "MainWindow") -> None:
     view_menu.addAction(window.action_show_line_breaks)
     view_menu.addSeparator()
     view_menu.addAction(window.action_font)
+    view_menu.addAction(window.action_wheel_scroll_lines)
 
     # 「設定」メニュー（実機フィードバックにより新設）。配色・テーマ・
     # タブ幅などの「見た目の設定」を「表示」から移してここへ集約する。

@@ -31,7 +31,8 @@
 
 ``MainWindow`` にミックスインとして混ぜて使う。``self.tabs``・
 ``self.editors()``・``self.current_editor()``・``self._adopt_editor()``・
-``self._on_tab_set_changed()``・``self.open_windows()`` に依存する。
+``self._on_tab_set_changed()``・``self._refresh_file_watches()``・
+``self.open_windows()`` に依存する。
 """
 
 from __future__ import annotations
@@ -154,6 +155,13 @@ class TabTransferMixin:
             return
         self.tabs.removeTab(index)
         self._on_tab_set_changed()
+        # 出ていったファイルの監視は、こちらではもう要らない
+        # （移った先のウィンドウが `_attach_editor` で自分の分を登録する）。
+        # タブを閉じたとき (`MainWindow.close_editor`) と同じ後片付けで、
+        # 忘れると**自分のタブには無いファイルを見張り続ける**。
+        # ネットワーク上のファイルだった場合は 45 秒おきの見回りも
+        # 止まらないままになる（引き継ぎ ⑭⑮）。
+        self._refresh_file_watches()
         target._adopt_editor(editor)
         target.tabs.setCurrentWidget(editor)
         target.raise_()
@@ -168,6 +176,8 @@ class TabTransferMixin:
             return None
         self.tabs.removeTab(index)
         self._on_tab_set_changed()
+        # 移動と同じ後片付け（上の :meth:`_move_tab_to_window` 参照）。
+        self._refresh_file_watches()
 
         # 循環 import を避けるため、MainWindow を名指しせず自分と同じ型を作る。
         new_window = type(self)()

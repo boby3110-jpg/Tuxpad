@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtNetwork import QLocalSocket
+from PySide6.QtWidgets import QApplication
 
 from editor_app import ipc
 
@@ -118,3 +119,108 @@ def test_server_takes_over_a_leftover_socket(qtbot) -> None:
     finally:
         fresh.close()
         leftover.close()
+
+
+# ----------------------------------------------------------------------
+# 一度に大量のパスを転送したとき（84 回目に足した 3 件）
+#
+# `ipc.py` は 1 行あたりの変異が薄い 3 モジュールの 1 つだった
+# （77 回目の申し送り）。受け取り側の「溜め込み」と「後始末」は、
+# 壊しても全件緑のまま通り抜けていた。
+# ----------------------------------------------------------------------
+def test_paths_split_across_two_reads_arrive_whole(qtbot) -> None:
+    """何回かに分かれて届いても、**繋ぎ合わせてから**読むこと。
+
+    送られた中身が 1 回の ``readyRead`` で全部読めるとは限らない。別の
+    プロセスが書いている間に受け側のイベントループが回るので、緩衝の
+    大きさを超えると**途中まで読んだ時点で 1 回**呼ばれる。受け側が
+    溜め込み (``extend``) ではなく上書きになっていると、**最後の塊だけ**が
+    残る——ファイルマネージャーで大量のファイルを選んで「Tuxpad で開く」
+    したときに、**後ろの何個かしか開かない**という形で出る。
+
+    既存のテストはどれも 1〜2 個しか送っておらず、**1 プロセスの中では
+    250KiB を一度に書いても 1 回で読み切れてしまう**（84 回目に実測）
+    ため、この違いが出なかった。そこで分かれて届く形をここで作る。
+    区切りは**マルチバイト文字の途中**（``あ`` の 3 バイトの間）に置く。
+    こうしておくと、塊ごとに文字コードを解く作りに変えたときも
+    ここで気づける（84 回目に実測。変異 ``ipc-server-overwrites-buffer``）。
+    """
+    server = ipc.InstanceServer()
+    received: list[list[str]] = []
+    server.paths_received.connect(received.append)
+
+    payload = "/tmp/前半.txt\n/tmp/後半.txt\n".encode("utf-8")
+    split = payload.index("後".encode("utf-8")) + 1  # 「後」の 1 バイト目まで
+
+    socket = QLocalSocket()
+    try:
+        socket.connectToServer(ipc.SERVER_NAME)
+        assert socket.waitForConnected(2000) is True
+        socket.write(payload[:split])
+        socket.waitForBytesWritten(2000)
+        # 受け側へ 1 回目の readyRead を配る（別プロセスならここが
+        # 「相手のイベントループが回った」場面に当たる）。
+        qtbot.waitUntil(lambda: server._pending_sockets != [], timeout=2000)
+        QApplication.processEvents()
+
+        socket.write(payload[split:])
+        socket.waitForBytesWritten(2000)
+        QApplication.processEvents()
+
+        socket.disconnectFromServer()
+        qtbot.waitUntil(lambda: len(received) == 1, timeout=2000)
+        assert received == [["/tmp/前半.txt", "/tmp/後半.txt"]]
+    finally:
+        socket.abort()
+        server.close()
+
+
+def test_delivered_sockets_are_not_kept_forever(qtbot) -> None:
+    """受け取り終わったソケットを、控えの一覧に残したままにしないこと。
+
+    ``_pending_sockets`` は「配送の途中だけ」ソケットを握るための控えで、
+    配送し終えたら外す。外し忘れても**配送そのものは今までどおり動く**
+    ので、全件緑のまま通り抜ける（84 回目に実測。変異
+    ``ipc-server-keeps-every-socket``）。
+
+    実害は、**起動したままのプロセスに転送が届くたびに増え続けること**。
+    ファイルマネージャーからの「Tuxpad で開く」は 1 回 1 接続なので、
+    一日中開いたままの使い方（この道具の普通の使い方）では確実に溜まる。
+    """
+    server = ipc.InstanceServer()
+    received: list[list[str]] = []
+    server.paths_received.connect(received.append)
+
+    try:
+        for index in range(3):
+            assert ipc.try_forward_to_running_instance([f"/tmp/{index}.txt"]) is True
+            qtbot.waitUntil(lambda: len(received) == index + 1, timeout=2000)
+        assert server._pending_sockets == []
+    finally:
+        server.close()
+
+
+def test_delivered_sockets_are_actually_disposed(qtbot) -> None:
+    """受け取り終わったソケットを、Qt 側でも捨てること（``deleteLater``）。
+
+    ``nextPendingConnection()`` が返すソケットは**サーバーの子**として
+    作られるため、Python 側の控えを外しただけでは消えない。捨て忘れても
+    配送は今までどおり動くので、ここも全件緑のまま通り抜けていた
+    （84 回目に実測。変異 ``ipc-server-never-disposes-sockets``）。
+    上の控えの一覧と**別に**見る必要があるのは、溜まる場所が 2 つある
+    ということに他ならない。
+    """
+    server = ipc.InstanceServer()
+    received: list[list[str]] = []
+    server.paths_received.connect(received.append)
+
+    def accepted_sockets() -> list[QLocalSocket]:
+        return [child for child in server._server.children() if isinstance(child, QLocalSocket)]
+
+    try:
+        assert ipc.try_forward_to_running_instance(["/tmp/a.txt"]) is True
+        qtbot.waitUntil(lambda: len(received) == 1, timeout=2000)
+        # deleteLater() はイベントループに戻ってから効くので、消えるまで待つ。
+        qtbot.waitUntil(lambda: accepted_sockets() == [], timeout=2000)
+    finally:
+        server.close()

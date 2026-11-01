@@ -33,7 +33,13 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 from .dialogs import prompt_color, prompt_font, prompt_int
-from .editor import DEFAULT_FONT_FAMILY, WRAP_FIXED, WRAP_NONE, WRAP_WINDOW
+from .editor import (
+    DEFAULT_FONT_FAMILY,
+    MAX_WHEEL_SCROLL_LINES,
+    WRAP_FIXED,
+    WRAP_NONE,
+    WRAP_WINDOW,
+)
 from .settings import (
     IPC_TARGET_ACTIVE,
     IPC_TARGET_FIRST,
@@ -45,6 +51,7 @@ from .settings import (
     load_show_line_breaks,
     load_tab_colors,
     load_theme,
+    load_wheel_scroll_lines,
     load_wrap_settings,
     save_editor_colors,
     save_font_settings,
@@ -53,6 +60,7 @@ from .settings import (
     save_show_line_breaks,
     save_tab_colors,
     save_theme,
+    save_wheel_scroll_lines,
     save_wrap_settings,
 )
 from .tab_bar import MAX_TAB_WIDTH, MIN_TAB_WIDTH
@@ -76,6 +84,7 @@ class ViewSettingsMixin:
         self._wrap_mode, self._wrap_column = load_wrap_settings()
         self._show_line_breaks = load_show_line_breaks()
         self._font_family, self._font_size = load_font_settings()
+        self._wheel_scroll_lines = load_wheel_scroll_lines()
         self._editor_bg, self._editor_fg = load_editor_colors()
         self._tab_active_color, self._tab_inactive_color = load_tab_colors()
 
@@ -96,6 +105,7 @@ class ViewSettingsMixin:
         editor.set_font_settings(self._font_family, self._font_size)
         editor.set_editor_colors(self._editor_bg, self._editor_fg)
         editor.set_show_line_breaks(self._show_line_breaks)
+        editor.set_wheel_scroll_lines(self._wheel_scroll_lines)
 
     def _sync_view_action_states(self) -> None:
         """チェック付きメニュー項目の初期状態を、いまの設定に合わせる。
@@ -204,6 +214,41 @@ class ViewSettingsMixin:
         if chosen is None:
             return
         self.set_font_settings(*chosen)
+
+    # ------------------------------------------------------------------
+    # ホイールのスクロール量（2026-10-26 実機フィードバックにより追加）
+    # ------------------------------------------------------------------
+    def wheel_scroll_lines(self) -> int:
+        """ホイール 1 ノッチで本文を送る行数。"""
+        return self._wheel_scroll_lines
+
+    def set_wheel_scroll_lines(self, lines: int) -> None:
+        """ホイール 1 ノッチで本文を送る行数を変える。
+
+        テーマや検索欄の高さと同じく、**アプリ全体で共有する設定**として
+        扱う（開いている全ウィンドウの全タブへ即座に反映し、次回起動時にも
+        復元する）。ウィンドウごとに違う量で動くと、窓を移ったときに
+        手触りが変わって戸惑うため。
+        """
+        for window in self.open_windows():
+            window._wheel_scroll_lines = lines
+            for editor in window.editors():
+                editor.set_wheel_scroll_lines(lines)
+        save_wheel_scroll_lines(lines)
+
+    def _prompt_wheel_scroll_lines(self) -> None:
+        """ホイールのスクロール量（行）をダイアログで尋ねる。"""
+        value = prompt_int(
+            self,
+            "ホイールのスクロール量",
+            "ホイール 1 目盛りで動かす行数:",
+            self._wheel_scroll_lines,
+            1,
+            MAX_WHEEL_SCROLL_LINES,
+        )
+        if value is None:
+            return
+        self.set_wheel_scroll_lines(value)
 
     # ------------------------------------------------------------------
     # タブの幅（実機フィードバックにより追加。ウィンドウごとに独立した設定）
