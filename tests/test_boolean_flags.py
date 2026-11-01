@@ -124,9 +124,18 @@ def test_the_dragged_tab_picture_uses_the_active_tab_color(qtbot) -> None:
     # いま選択していない 2 枚目をつかむ（選択中の 1 枚目と区別するため）。
     pixmap = bar._drag_pixmap(1)
     assert pixmap is not None
-    rect = bar.tabRect(1)
     image = pixmap.toImage()
-    middle = QColor(image.pixel(rect.width() // 2, rect.height() // 2))
+    # 見るのは「絵の中でいちばん多い色」＝タブの背景色。**真ん中の 1 点を
+    # 見てはいけない**: タブ名の文字がそこに掛かると文字の色を拾う。
+    # 公開リポの CI に日本語フォントを入れた途端（2026-11-01）、「い」の字が
+    # 真ん中に描かれるようになってここが落ちた（それまでは字が豆腐で細く、
+    # たまたま外れていた）。
+    counts: dict[int, int] = {}
+    for y in range(image.height()):
+        for x in range(image.width()):
+            pixel = image.pixel(x, y)
+            counts[pixel] = counts.get(pixel, 0) + 1
+    background = QColor(max(counts, key=counts.get))
 
-    assert middle == active
-    assert middle != inactive
+    assert background == active
+    assert background != inactive
