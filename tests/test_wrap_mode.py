@@ -95,6 +95,13 @@ def test_editor_set_wrap_window(window: MainWindow) -> None:
 
     lines = visual_lines(editor)
     assert all(len(line) > 1 for line in lines[:4]), lines
+    # 半角と全角で幅が違うことが、この確かめ方の前提。日本語フォントの
+    # 無い環境（公開リポの CI に以前そうだった）では全角が半角と同じ幅で
+    # 描かれ、前提が崩れる（2026-11-01 に実際にここで落ちた）。そのときは
+    # 理由を出して飛ばす——Tuxpad の不具合ではなく、環境の違いなので。
+    metrics = editor.fontMetrics()
+    if metrics.horizontalAdvance("あ") <= metrics.horizontalAdvance("a"):
+        pytest.skip("日本語フォントが無く、全角と半角の幅に差が出ない環境")
     # 半角 (9px) の行は、全角 (15px) の行より 1 行に多く入る。
     assert len(lines[0][0]) > len(lines[1][0]), lines
     # 折り返しても文字は 1 つも落ちない。
